@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { payDebt } from "@/app/_actions/pay-debt";
 
 interface PayDebtButtonProps {
+  barbershopId: string;
   userId?: string | null;
   bookingId?: string | null;
   clientName?: string | null;
@@ -15,6 +16,7 @@ interface PayDebtButtonProps {
 }
 
 const PayDebtButton = ({
+  barbershopId,
   userId,
   bookingId,
   clientName,
@@ -129,6 +131,7 @@ const PayDebtButton = ({
     startTransition(async () => {
       try {
         const result = await payDebt({
+          barbershopId,
           userId: userId ?? undefined,
           bookingId: bookingId ?? undefined,
           clientName: clientName ?? undefined,

@@ -1,33 +1,47 @@
 "use server";
 
 import { getServerSession } from "next-auth";
+
 import { revalidatePath } from "next/cache";
 
 import { authOptions } from "@/lib/auth";
+
 import { db } from "@/lib/prisma";
+
 import { calculateBookingDiscount } from "@/app/utils/booking-discount";
+
 import {
   getPricedBookingServices,
   isHaircutService,
 } from "@/app/utils/booking-pricing";
+
 import { validateBusinessSchedule } from "@/lib/business-schedule";
+
 import { sendPushNotification } from "@/lib/push";
 
 interface CreateBookingParams {
   serviceIds: string[];
+
   date: string;
+
   time: string;
+
   isChild?: boolean;
 }
 
 export const createBooking = async ({
   serviceIds,
+
   date,
+
   time,
+
   isChild = false,
 }: CreateBookingParams) => {
   // =====================================================
+
   // 1. VERIFICAR AUTENTICAÇÃO
+
   // =====================================================
 
   const session = await getServerSession(authOptions);
@@ -37,7 +51,9 @@ export const createBooking = async ({
   }
 
   // =====================================================
+
   // 2. VALIDAR SERVIÇOS
+
   // =====================================================
 
   if (!Array.isArray(serviceIds) || serviceIds.length === 0) {
@@ -45,10 +61,13 @@ export const createBooking = async ({
   }
 
   // Remove serviços duplicados.
+
   const uniqueServiceIds = [...new Set(serviceIds)];
 
   // =====================================================
+
   // 3. VALIDAR DATA
+
   // =====================================================
 
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
@@ -70,10 +89,15 @@ export const createBooking = async ({
   }
 
   // =====================================================
+
   // 4. VALIDAR SE A DATA REALMENTE EXISTE
+
   // =====================================================
+
   //
+
   // Usamos UTC ao meio-dia para evitar problemas de fuso
+
   // ao descobrir o dia da semana.
 
   const dateForDayOfWeek = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
@@ -83,9 +107,13 @@ export const createBooking = async ({
   }
 
   // Impede datas inexistentes como:
+
   // 31/02/2026
+
   // 31/04/2026
+
   // etc.
+
   if (
     dateForDayOfWeek.getUTCFullYear() !== year ||
     dateForDayOfWeek.getUTCMonth() !== month - 1 ||
@@ -95,7 +123,9 @@ export const createBooking = async ({
   }
 
   // =====================================================
+
   // 5. VALIDAR HORÁRIO
+
   // =====================================================
 
   if (!/^\d{2}:\d{2}$/.test(time)) {
@@ -116,13 +146,17 @@ export const createBooking = async ({
   }
 
   // =====================================================
+
   // 6. DESCOBRIR O DIA DA SEMANA
+
   // =====================================================
 
   const dayOfWeek = dateForDayOfWeek.getUTCDay();
 
   // =====================================================
+
   // 7. BUSCAR OS SERVIÇOS NO BANCO
+
   // =====================================================
 
   const services = await db.barbershopService.findMany({
@@ -138,7 +172,9 @@ export const createBooking = async ({
   }
 
   // =====================================================
+
   // 8. GARANTIR QUE OS SERVIÇOS SÃO DA MESMA BARBEARIA
+
   // =====================================================
 
   const barbershopId = services[0].barbershopId;
@@ -154,20 +190,30 @@ export const createBooking = async ({
   }
 
   // =====================================================
+
   // 9. VALIDAR DATA ATUAL NO HORÁRIO DE SÃO PAULO
+
   // =====================================================
+
   //
+
   // A aplicação trabalha com America/Sao_Paulo.
+
   //
+
   // Não utilizamos apenas new Date().getDate(), porque
+
   // o ambiente da Vercel pode trabalhar em UTC.
 
   const now = new Date();
 
   const saoPauloParts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Sao_Paulo",
+
     year: "numeric",
+
     month: "2-digit",
+
     day: "2-digit",
   }).formatToParts(now);
 
@@ -184,6 +230,7 @@ export const createBooking = async ({
   );
 
   // Impede agendamento em datas passadas.
+
   if (
     year < currentYear ||
     (year === currentYear && month < currentMonth) ||
@@ -193,25 +240,40 @@ export const createBooking = async ({
   }
 
   // =====================================================
+
   // 10. VALIDAR MÊS DA AGENDA
+
   // =====================================================
+
   //
+
   // Hierarquia:
+
   //
+
   // MÊS
+
   //   ↓
+
   // DIA
+
   //   ↓
+
   // HORÁRIO
+
   //
+
   // O cliente somente pode agendar se o mês estiver
+
   // explicitamente liberado pelo barbeiro.
 
   const businessMonth = await db.businessMonth.findUnique({
     where: {
       barbershopId_year_month: {
         barbershopId,
+
         year,
+
         month,
       },
     },
@@ -226,7 +288,9 @@ export const createBooking = async ({
   }
 
   // =====================================================
+
   // 11. VALIDAR REGRA DE CORTE INFANTIL
+
   // =====================================================
 
   const hasHaircut = services.some((service) => isHaircutService(service.name));
@@ -238,91 +302,79 @@ export const createBooking = async ({
   }
 
   // =====================================================
+
   // 12. VALIDAR AGENDA DA BARBEARIA
+
   // =====================================================
+
   //
+
   // Aqui são verificadas:
+
   //
+
   // - dia da semana;
+
   // - horário;
+
   // - BusinessDay;
+
   // - BusinessTimeSlot.
 
   await validateBusinessSchedule({
     barbershopId,
+
     dayOfWeek,
+
     time,
   });
 
   // =====================================================
+
   // 13. DEFINIR USUÁRIO
-  // =====================================================
-
-  const bookingUserId = session.user.id;
 
   // =====================================================
+
+  // =====================================================
+
   // 14. CALCULAR PREÇOS
+
   // =====================================================
 
   const pricedServices = getPricedBookingServices(
     services.map((service) => ({
       id: service.id,
+
       name: service.name,
+
       price: Number(service.price),
     })),
+
     isChild,
   );
 
   // =====================================================
+
   // 15. CALCULAR DESCONTO
+
   // =====================================================
 
   const discountResult = calculateBookingDiscount(
     pricedServices.map((service) => ({
       name: service.name,
+
       price: service.price,
     })),
   );
 
   // =====================================================
-  // 16. VERIFICAR HORÁRIO FIXO
+  // 16. CRIAR DATA COMPLETA DO AGENDAMENTO
   // =====================================================
-  //
-  // FixedSchedule continua funcionando normalmente.
-  //
-  // Uma exceção libera o horário para uma determinada data.
-
-  const fixedSchedule = await db.fixedSchedule.findFirst({
-    where: {
-      barbershopId,
-      dayOfWeek,
-      time,
-      active: true,
-    },
-  });
-
-  if (fixedSchedule) {
-    const fixedScheduleException = await db.fixedScheduleException.findUnique({
-      where: {
-        barbershopId_date_time: {
-          barbershopId,
-          date: new Date(Date.UTC(year, month - 1, day)),
-          time,
-        },
-      },
-    });
-
-    if (!fixedScheduleException) {
-      throw new Error(
-        `Este horário já está reservado para ${fixedSchedule.clientName}.`,
-      );
-    }
-  }
 
   // =====================================================
-  // 17. CRIAR DATA COMPLETA DO AGENDAMENTO
-  // =====================================================
+
   //
+
   // O horário da barbearia é São Paulo (UTC-3).
 
   const bookingDate = new Date(`${date}T${time}:00-03:00`);
@@ -332,21 +384,44 @@ export const createBooking = async ({
   }
 
   // =====================================================
-  // 18. VERIFICAR HORÁRIO JÁ OCUPADO
+
+  // 17. VERIFICAR SOBREPOSIÇÃO DE AGENDAMENTOS
+
   // =====================================================
 
   const slotStart = new Date(bookingDate);
 
   slotStart.setSeconds(0, 0);
 
-  const slotEnd = new Date(slotStart);
+  // Duração total de todos os serviços escolhidos pelo cliente.
 
-  slotEnd.setMinutes(slotEnd.getMinutes() + 1);
+  const totalDurationMinutes = services.reduce(
+    (total, service) => total + service.durationMinutes,
 
-  const existingBooking = await db.booking.findFirst({
+    0,
+  );
+
+  if (totalDurationMinutes <= 0) {
+    throw new Error("A duração dos serviços é inválida.");
+  }
+
+  const slotEnd = new Date(slotStart.getTime() + totalDurationMinutes * 60_000);
+
+  // Buscar agendamentos do mesmo estabelecimento que começam
+
+  // antes do término do novo agendamento.
+
+  const dayStart = new Date(slotStart);
+
+  dayStart.setHours(0, 0, 0, 0);
+
+  const existingBookings = await db.booking.findMany({
     where: {
+      barbershopId,
+
       date: {
-        gte: slotStart,
+        gte: dayStart,
+
         lt: slotEnd,
       },
 
@@ -354,21 +429,69 @@ export const createBooking = async ({
         in: ["PENDING", "CONFIRMED"],
       },
     },
+
+    select: {
+      date: true,
+
+      service: {
+        select: {
+          durationMinutes: true,
+        },
+      },
+
+      bookingItems: {
+        select: {
+          service: {
+            select: {
+              durationMinutes: true,
+            },
+          },
+        },
+      },
+    },
   });
 
-  if (existingBooking) {
-    throw new Error("Este horário já está reservado por outro cliente.");
+  const hasOverlap = existingBookings.some((existingBooking) => {
+    const existingStart = existingBooking.date;
+
+    // Os itens normalmente contêm todos os serviços do agendamento.
+
+    // Para agendamentos antigos sem itens, usar o serviço principal.
+
+    const existingDurationMinutes =
+      existingBooking.bookingItems.length > 0
+        ? existingBooking.bookingItems.reduce(
+            (total, item) => total + item.service.durationMinutes,
+
+            0,
+          )
+        : existingBooking.service.durationMinutes;
+
+    const existingEnd = new Date(
+      existingStart.getTime() + existingDurationMinutes * 60_000,
+    );
+
+    return existingStart < slotEnd && existingEnd > slotStart;
+  });
+
+  if (hasOverlap) {
+    throw new Error(
+      "Este horário está ocupado. Escolha outro horário disponível.",
+    );
   }
 
   // =====================================================
-  // 19. CRIAR AGENDAMENTO
+
+  // 18. CRIAR AGENDAMENTO
+
   // =====================================================
 
   const booking = await db.booking.create({
     data: {
-      userId: bookingUserId,
+      userId: session.user.id,
 
-      // Campo legado mantido para compatibilidade.
+      barbershopId,
+
       serviceId: uniqueServiceIds[0],
 
       date: bookingDate,
@@ -376,28 +499,25 @@ export const createBooking = async ({
       status: "PENDING",
 
       subtotal: discountResult.subtotal,
+
       discount: discountResult.discount,
+
       total: discountResult.total,
 
       bookingItems: {
         create: pricedServices.map((service) => ({
           serviceId: service.id,
+
           price: service.price,
         })),
-      },
-    },
-
-    include: {
-      bookingItems: {
-        include: {
-          service: true,
-        },
       },
     },
   });
 
   // =====================================================
-  // 20. ENVIAR PUSH PARA O BARBEIRO
+
+  // 19. ENVIAR PUSH PARA O BARBEIRO
+
   // =====================================================
 
   try {
@@ -408,6 +528,7 @@ export const createBooking = async ({
 
       select: {
         id: true,
+
         pushSubscriptions: true,
       },
     });
@@ -418,8 +539,11 @@ export const createBooking = async ({
 
     const formattedDate = new Intl.DateTimeFormat("pt-BR", {
       timeZone: "America/Sao_Paulo",
+
       day: "2-digit",
+
       month: "2-digit",
+
       year: "numeric",
     }).format(bookingDate);
 
@@ -438,6 +562,7 @@ export const createBooking = async ({
         } catch (error: unknown) {
           console.error(
             `Erro ao enviar Push para o barbeiro ${barber.id}:`,
+
             error,
           );
 
@@ -450,11 +575,17 @@ export const createBooking = async ({
               : undefined;
 
           /**
+
            * 404 / 410 normalmente significam que a
+
            * subscription deixou de ser válida.
+
            *
+
            * Nesse caso removemos do banco.
+
            */
+
           if (statusCode === 404 || statusCode === 410) {
             try {
               await db.pushSubscription.delete({
@@ -467,6 +598,7 @@ export const createBooking = async ({
             } catch (deleteError) {
               console.error(
                 "Erro ao remover PushSubscription expirada:",
+
                 deleteError,
               );
             }
@@ -476,22 +608,32 @@ export const createBooking = async ({
     }
   } catch (error) {
     /**
+
      * Falha na notificação NÃO deve cancelar
+
      * um agendamento que já foi criado.
+
      */
+
     console.error("Erro geral ao enviar notificação para o barbeiro:", error);
   }
 
   // =====================================================
-  // 21. ATUALIZAR PÁGINAS
+
+  // 20. ATUALIZAR PÁGINAS
+
   // =====================================================
 
   revalidatePath("/");
+
   revalidatePath("/bookings");
+
   revalidatePath("/barbeiro/dashboard");
 
   // =====================================================
-  // 22. RETORNAR RESULTADO
+
+  // 21. RETORNAR RESULTADO
+
   // =====================================================
 
   return {
@@ -500,7 +642,9 @@ export const createBooking = async ({
     bookingId: booking.id,
 
     subtotal: discountResult.subtotal,
+
     discount: discountResult.discount,
+
     total: discountResult.total,
 
     discountDescription: discountResult.description,

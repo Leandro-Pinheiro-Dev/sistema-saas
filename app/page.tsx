@@ -26,6 +26,8 @@ import Link from "next/link";
 
 import EnablePushNotifications from "@/app/_components/enable-push-notifications";
 
+import { getCurrentUserMemberships } from "@/lib/permissions/membership";
+
 const Home = async () => {
   // =====================================================
   // VERIFICA AUTENTICAÇÃO
@@ -44,9 +46,19 @@ const Home = async () => {
   // -----------------------------------------------------
   // BARBEIRO
   // -----------------------------------------------------
-
   if (session.user.role === "BARBER") {
-    redirect("/barbeiro/dashboard");
+    const memberships = await getCurrentUserMemberships();
+
+    const ownerMembership = memberships.find(
+      (membership) => membership.role === "OWNER",
+    );
+
+    if (ownerMembership) {
+      redirect("/barbeiro/dashboard");
+    }
+
+    // Usuário BARBER sem estabelecimento próprio:
+    // não redirecionar automaticamente ao dashboard.
   }
 
   // =====================================================

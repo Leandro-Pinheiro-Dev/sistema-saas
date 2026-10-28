@@ -36,11 +36,10 @@ import {
 
 import { createBooking } from "@/app/_actions/create-booking";
 import { getBookings } from "@/app/_actions/get-bookings";
-import { getFixedSchedules } from "@/app/_actions/get-fixed-schedules";
 
 import {
-  getBusinessSchedule,
-  getBusinessMonths,
+  getPublicBusinessSchedule,
+  getPublicBusinessMonths,
   type BusinessScheduleDay,
 } from "@/app/barbeiro/dashboard/_actions/business-schedule";
 
@@ -59,6 +58,7 @@ interface Service {
   id: string;
   name: string;
   price: number;
+  durationMinutes: number;
 }
 
 interface BusinessMonth {
@@ -173,15 +173,7 @@ export function useServiceCart() {
 
 interface BookingData {
   date: Date;
-}
-
-// =====================================================
-// TIPOS DOS HORÁRIOS FIXOS
-// =====================================================
-
-interface FixedScheduleData {
-  clientName: string;
-  time: string;
+  durationMinutes: number;
 }
 
 // =====================================================
@@ -217,8 +209,6 @@ export function ServiceCart({
   const [selectedTime, setSelectedTime] = useState<string>();
 
   const [bookings, setBookings] = useState<BookingData[]>([]);
-
-  const [fixedSchedules, setFixedSchedules] = useState<FixedScheduleData[]>([]);
 
   const [loadingAvailability, setLoadingAvailability] = useState(false);
 
@@ -381,8 +371,8 @@ export function ServiceCart({
       setBusinessScheduleLoaded(false);
 
       const [scheduleResult, monthsResult] = await Promise.all([
-        getBusinessSchedule(),
-        getBusinessMonths(),
+        getPublicBusinessSchedule(barbershopId),
+        getPublicBusinessMonths(barbershopId),
       ]);
 
       const schedule = scheduleResult ?? [];
@@ -455,7 +445,7 @@ export function ServiceCart({
     } finally {
       setLoadingBusinessSchedule(false);
     }
-  }, [today, isPastMonth]);
+  }, [today, isPastMonth, barbershopId]);
 
   // ===================================================
   // ABRIR / FECHAR CARRINHO
@@ -629,7 +619,6 @@ export function ServiceCart({
     setSelectedDate(undefined);
     setSelectedTime(undefined);
     setBookings([]);
-    setFixedSchedules([]);
 
     if (!businessScheduleLoaded) {
       return;
@@ -672,8 +661,6 @@ export function ServiceCart({
     setSelectedTime(undefined);
 
     setBookings([]);
-
-    setFixedSchedules([]);
 
     if (!date) {
       return;
@@ -788,22 +775,12 @@ export function ServiceCart({
     try {
       setLoadingAvailability(true);
 
-      const dateString = formatDateForServer(date);
-
-      const [bookingsResult, fixedSchedulesResult] = await Promise.all([
-        getBookings({
-          date,
-        }),
-
-        getFixedSchedules({
-          barbershopId,
-          date: dateString,
-        }),
-      ]);
+      const bookingsResult = await getBookings({
+        barbershopId,
+        date,
+      });
 
       setBookings(bookingsResult ?? []);
-
-      setFixedSchedules(fixedSchedulesResult ?? []);
     } catch (error) {
       console.error("Erro ao carregar disponibilidade:", error);
 
@@ -817,35 +794,29 @@ export function ServiceCart({
   // VERIFICAR HORÁRIO INDISPONÍVEL
   // ===================================================
 
+  // ===================================================
+  // VERIFICAR HORÁRIO INDISPONÍVEL
+  // ===================================================
+
   const isTimeUnavailable = (time: string) => {
-    if (!selectedDate) {
+    if (!selectedDate || services.length === 0) {
       return true;
     }
 
-    // -------------------------------------------------
-    // MÊS
-    // -------------------------------------------------
-
+    // Verificar se o mês está liberado.
     if (!isBusinessMonthActive(selectedDate)) {
       return true;
     }
 
-    // -------------------------------------------------
-    // DIA
-    // -------------------------------------------------
-
+    // Verificar se o estabelecimento atende neste dia.
     const dayOfWeek = selectedDate.getDay();
-
     const businessDay = getBusinessDay(dayOfWeek);
 
     if (!businessDay || !businessDay.active) {
       return true;
     }
 
-    // -------------------------------------------------
-    // HORÁRIO CONFIGURADO
-    // -------------------------------------------------
-
+    // Verificar se o horário está configurado e ativo.
     const businessTimeSlot = businessDay.timeSlots.find(
       (slot) => slot.time === time,
     );
@@ -854,35 +825,57 @@ export function ServiceCart({
       return true;
     }
 
-    // -------------------------------------------------
-    // HORÁRIO FIXO
-    // -------------------------------------------------
-
-    const fixedScheduleExists = fixedSchedules.some(
-      (schedule) => schedule.time === time,
+    // Somar a duração de todos os serviços selecionados.
+    const totalDurationMinutes = services.reduce(
+      (total, service) => total + service.durationMinutes,
+      0,
     );
 
-    if (fixedScheduleExists) {
+    if (!Number.isFinite(totalDurationMinutes) || totalDurationMinutes <= 0) {
       return true;
     }
 
-    // -------------------------------------------------
-    // AGENDAMENTO NORMAL
-    // -------------------------------------------------
-
+    // Construir o intervalo do novo agendamento no horário de São Paulo.
     const selectedDateString = format(selectedDate, "yyyy-MM-dd");
 
-    const bookingExists = bookings.some((booking) => {
-      const bookingDate = new Date(booking.date);
+    const candidateStart = new Date(`${selectedDateString}T${time}:00-03:00`);
 
-      const bookingDateString = format(bookingDate, "yyyy-MM-dd");
+    if (Number.isNaN(candidateStart.getTime())) {
+      return true;
+    }
 
-      const bookingTime = format(bookingDate, "HH:mm");
+    const candidateEnd = new Date(
+      candidateStart.getTime() + totalDurationMinutes * 60_000,
+    );
 
-      return bookingDateString === selectedDateString && bookingTime === time;
+    // Verificar sobreposição com agendamentos existentes.
+    const bookingHasOverlap = bookings.some((booking) => {
+      const bookingStart = new Date(booking.date);
+
+      if (Number.isNaN(bookingStart.getTime())) {
+        return false;
+      }
+
+      const bookingDurationMinutes = booking.durationMinutes;
+
+      if (
+        !Number.isFinite(bookingDurationMinutes) ||
+        bookingDurationMinutes <= 0
+      ) {
+        return false;
+      }
+
+      const bookingEnd = new Date(
+        bookingStart.getTime() + bookingDurationMinutes * 60_000,
+      );
+
+      // Dois intervalos se sobrepõem quando:
+      // início existente < fim candidato
+      // e fim existente > início candidato.
+      return bookingStart < candidateEnd && bookingEnd > candidateStart;
     });
 
-    return bookingExists;
+    return bookingHasOverlap;
   };
 
   // ===================================================
@@ -996,8 +989,6 @@ export function ServiceCart({
       setSelectedTime(undefined);
 
       setBookings([]);
-
-      setFixedSchedules([]);
 
       setOpen(false);
     } catch (error) {
@@ -1349,19 +1340,6 @@ export function ServiceCart({
                     })}
                   </div>
                 )}
-
-                {/* =================================================
-                    AVISO HORÁRIOS FIXOS
-                ================================================= */}
-
-                {!loadingAvailability && fixedSchedules.length > 0 && (
-                  <div className="mt-4 rounded-lg border bg-muted/50 p-3">
-                    <p className="text-xs text-muted-foreground">
-                      Alguns horários estão indisponíveis porque já possuem
-                      horários fixos.
-                    </p>
-                  </div>
-                )}
               </CardContent>
             </Card>
           )}
@@ -1489,8 +1467,6 @@ export function ServiceCart({
               setSelectedTime(undefined);
 
               setBookings([]);
-
-              setFixedSchedules([]);
             }}
           >
             <Minus className="mr-2 h-4 w-4" />

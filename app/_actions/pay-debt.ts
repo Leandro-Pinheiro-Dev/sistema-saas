@@ -2,30 +2,21 @@
 
 import { getServerSession } from "next-auth";
 import { revalidatePath } from "next/cache";
+import { requireBusinessStaff } from "@/lib/permissions/membership";
 
 import { authOptions } from "@/lib/auth";
 import { db } from "@/lib/prisma";
 
 interface PayDebtParams {
+  barbershopId: string;
   userId?: string | null;
   bookingId?: string | null;
   clientName?: string | null;
   clientPhone?: string | null;
   amount: number;
 }
-
 /**
- * Normaliza telefone deixando somente números.
- *
- * Exemplos:
- *
- * (11) 99999-9999
- * 11 99999-9999
- * 11999999999
- *
- * Todos viram:
- *
- * 11999999999
+ * Mantém somente os números do telefone.
  */
 const normalizePhone = (phone?: string | null) => {
   if (!phone) {
@@ -36,27 +27,14 @@ const normalizePhone = (phone?: string | null) => {
 };
 
 /**
- * Verifica se o userId representa um cliente manual.
- *
- * O sistema utiliza:
- *
- * manual:PHONE:11999999999
- *
- * como identificador virtual para clientes que não possuem
- * cadastro de usuário no sistema.
+ * Identifica um cliente manual usando o identificador virtual.
  */
 const isManualUserId = (userId?: string | null) => {
   return userId?.startsWith("manual:PHONE:") ?? false;
 };
 
 /**
- * Extrai o telefone de um identificador manual.
- *
- * manual:PHONE:11999999999
- *
- * retorna:
- *
- * 11999999999
+ * Extrai o telefone do identificador de cliente manual.
  */
 const getPhoneFromManualUserId = (userId?: string | null) => {
   if (!isManualUserId(userId)) {
@@ -67,227 +45,143 @@ const getPhoneFromManualUserId = (userId?: string | null) => {
 };
 
 export const payDebt = async ({
+  barbershopId,
   userId,
   bookingId,
   clientName,
   clientPhone,
   amount,
 }: PayDebtParams) => {
-  // =====================================================
-  // AUTENTICAÇÃO
-  // =====================================================
-
+  // 1. Autenticação
   const session = await getServerSession(authOptions);
 
   if (!session?.user?.id) {
     throw new Error("Usuário não autenticado.");
   }
 
-  // =====================================================
-  // AUTORIZAÇÃO
-  // =====================================================
-
-  if (session.user.role !== "BARBER") {
-    throw new Error("Acesso não autorizado.");
-  }
-
-  // =====================================================
-  // VALIDAÇÃO DO VALOR
-  // =====================================================
-
+  // 3. Validar valor
   if (!Number.isFinite(amount) || amount <= 0) {
     throw new Error("O valor do pagamento deve ser maior que zero.");
   }
 
-  // =====================================================
-  // IDENTIFICAÇÃO DO CLIENTE
-  // =====================================================
-
+  // 4. Validar identificação do cliente
   if (!userId && !bookingId && !clientName && !clientPhone) {
     throw new Error("Não foi possível identificar o cliente do pagamento.");
   }
-
-  // =====================================================
-  // IDENTIFICAR CLIENTE MANUAL
-  // =====================================================
-
+  await requireBusinessStaff(barbershopId);
+  // 6. Identificar cliente manual
   const manualPhoneFromUserId = getPhoneFromManualUserId(userId);
-
   const normalizedClientPhone = normalizePhone(clientPhone);
-
   const manualPhone = manualPhoneFromUserId || normalizedClientPhone;
-
   const manualClient = isManualUserId(userId);
 
-  // =====================================================
-  // LOCALIZAR AS MOVIMENTAÇÕES
-  // =====================================================
+  // 7. Consultar movimentações somente da empresa autorizada.
+  const selectFields = {
+    id: true,
+    userId: true,
+    bookingId: true,
+    barbershopId: true,
+    clientName: true,
+    clientPhone: true,
+    amount: true,
+    type: true,
+    description: true,
+    createdAt: true,
+  } as const;
 
   let transactions;
 
-  // -----------------------------------------------------
-  // CLIENTE MANUAL IDENTIFICADO PELO TELEFONE
-  // -----------------------------------------------------
-
   if (manualClient) {
-    /**
-     * Não utilizamos:
-     *
-     * where: {
-     *   userId: "manual:PHONE:..."
-     * }
-     *
-     * porque esse valor NÃO é um User.id real.
-     *
-     * Cliente manual possui:
-     *
-     * userId = null
-     */
-
     const manualTransactions = await db.customerDebt.findMany({
       where: {
+        barbershopId,
         userId: null,
       },
-      select: {
-        id: true,
-        userId: true,
-        bookingId: true,
-        clientName: true,
-        clientPhone: true,
-        amount: true,
-        type: true,
-        description: true,
-        createdAt: true,
-      },
+      select: selectFields,
       orderBy: {
         createdAt: "asc",
       },
     });
 
-    /**
-     * Comparamos o telefone normalizado.
-     *
-     * Isso permite encontrar tanto:
-     *
-     * 11999999999
-     *
-     * quanto:
-     *
-     * (11) 99999-9999
-     */
     transactions = manualTransactions.filter((transaction) => {
       const transactionPhone = normalizePhone(transaction.clientPhone);
 
-      return transactionPhone === manualPhone;
+      return transactionPhone === manualPhone && manualPhone !== "";
     });
-  }
-
-  // -----------------------------------------------------
-  // CLIENTE CADASTRADO
-  // -----------------------------------------------------
-  else if (userId) {
+  } else if (userId) {
     transactions = await db.customerDebt.findMany({
       where: {
+        barbershopId,
         userId,
       },
-      select: {
-        id: true,
-        userId: true,
-        bookingId: true,
-        clientName: true,
-        clientPhone: true,
-        amount: true,
-        type: true,
-        description: true,
-        createdAt: true,
-      },
+      select: selectFields,
       orderBy: {
         createdAt: "asc",
       },
     });
-  }
-
-  // -----------------------------------------------------
-  // AGENDAMENTO MANUAL / BOOKING
-  // -----------------------------------------------------
-  else if (bookingId) {
+  } else if (bookingId) {
     transactions = await db.customerDebt.findMany({
       where: {
+        barbershopId,
         bookingId,
       },
-      select: {
-        id: true,
-        userId: true,
-        bookingId: true,
-        clientName: true,
-        clientPhone: true,
-        amount: true,
-        type: true,
-        description: true,
-        createdAt: true,
-      },
+      select: selectFields,
       orderBy: {
         createdAt: "asc",
       },
     });
-  }
-
-  // -----------------------------------------------------
-  // CLIENTE MANUAL SEM BOOKING
-  // -----------------------------------------------------
-  else {
-    /**
-     * Como o telefone pode estar salvo com diferentes
-     * formatos, primeiro buscamos os clientes manuais
-     * e depois fazemos a comparação normalizada.
-     */
-
+  } else {
     const manualTransactions = await db.customerDebt.findMany({
       where: {
+        barbershopId,
         userId: null,
       },
-      select: {
-        id: true,
-        userId: true,
-        bookingId: true,
-        clientName: true,
-        clientPhone: true,
-        amount: true,
-        type: true,
-        description: true,
-        createdAt: true,
-      },
+      select: selectFields,
       orderBy: {
         createdAt: "asc",
       },
     });
+
+    const requestedName = clientName?.trim().toLowerCase() || "";
+    const requestedPhone = normalizedClientPhone;
 
     transactions = manualTransactions.filter((transaction) => {
       const sameName =
-        !clientName ||
-        transaction.clientName?.trim().toLowerCase() ===
-          clientName.trim().toLowerCase();
+        !requestedName ||
+        transaction.clientName?.trim().toLowerCase() === requestedName;
 
       const samePhone =
-        !normalizedClientPhone ||
-        normalizePhone(transaction.clientPhone) === normalizedClientPhone;
+        !requestedPhone ||
+        normalizePhone(transaction.clientPhone) === requestedPhone;
 
       return sameName && samePhone;
     });
   }
 
-  // =====================================================
-  // VERIFICAR SE EXISTEM TRANSAÇÕES
-  // =====================================================
-
-  if (!transactions || transactions.length === 0) {
-    throw new Error("Nenhuma movimentação encontrada para este cliente.");
+  if (transactions.length === 0) {
+    throw new Error(
+      "Nenhuma movimentação encontrada para este cliente nesta empresa.",
+    );
   }
 
-  // =====================================================
-  // CALCULAR SALDO
-  // =====================================================
+  // 8. Validar o agendamento, caso tenha sido informado.
+  if (bookingId) {
+    const booking = await db.booking.findFirst({
+      where: {
+        id: bookingId,
+        barbershopId,
+      },
+      select: {
+        id: true,
+      },
+    });
 
+    if (!booking) {
+      throw new Error("O agendamento não pertence à empresa selecionada.");
+    }
+  }
+
+  // 9. Calcular saldo devedor.
   const totalDebt = transactions.reduce((total, transaction) => {
     const value = Number(transaction.amount);
 
@@ -302,114 +196,67 @@ export const payDebt = async ({
     return total;
   }, 0);
 
-  // =====================================================
-  // VERIFICAR SALDO
-  // =====================================================
-
   if (totalDebt <= 0) {
     throw new Error("Este cliente não possui fiado em aberto.");
   }
 
-  // =====================================================
-  // PAGAMENTO MAIOR QUE A DÍVIDA
-  // =====================================================
-
   if (amount > totalDebt) {
     throw new Error(
-      `O pagamento não pode ser maior que a dívida de R$ ${totalDebt.toFixed(
-        2,
-      )}.`,
+      `O pagamento não pode ser maior que a dívida de R$ ${totalDebt.toFixed(2)}.`,
     );
   }
 
-  // =====================================================
-  // ÚLTIMA MOVIMENTAÇÃO
-  // =====================================================
-
+  // 10. Recuperar os dados da última movimentação.
   const lastTransaction = transactions[transactions.length - 1];
 
-  // =====================================================
-  // DEFINIR DADOS DO CLIENTE
-  // =====================================================
+  const finalClientName =
+    clientName?.trim() || lastTransaction?.clientName || null;
 
-  const finalClientName = clientName ?? lastTransaction?.clientName ?? null;
-
-  const finalClientPhone = clientPhone ?? lastTransaction?.clientPhone ?? null;
-
-  // =====================================================
-  // DEFINIR BOOKING
-  // =====================================================
+  const finalClientPhone =
+    clientPhone?.trim() || lastTransaction?.clientPhone || null;
 
   const finalBookingId = bookingId ?? lastTransaction?.bookingId ?? null;
-
-  // =====================================================
-  // DEFINIR USER ID REAL
-  // =====================================================
-
-  /**
-   * Cliente manual:
-   *
-   * userId = null
-   *
-   * Cliente cadastrado:
-   *
-   * userId = ID real do usuário
-   */
 
   const finalUserId = manualClient
     ? null
     : (userId ?? lastTransaction?.userId ?? null);
 
-  // =====================================================
-  // CRIAR PAGAMENTO DO FIADO
-  // =====================================================
+  // 11. Registrar pagamento e movimento financeiro
+  // atomicamente para evitar gravar somente um dos registros.
+  await db.$transaction(async (tx) => {
+    await tx.customerDebt.create({
+      data: {
+        barbershopId,
+        userId: finalUserId,
+        bookingId: finalBookingId,
+        clientName: finalClientName,
+        clientPhone: finalClientPhone,
+        amount,
+        type: "PAYMENT",
+        description: "Pagamento de fiado",
+      },
+    });
 
-  await db.customerDebt.create({
-    data: {
-      userId: finalUserId,
-      bookingId: finalBookingId,
-      clientName: finalClientName,
-      clientPhone: finalClientPhone,
-      amount,
-      type: "PAYMENT",
-      description: "Pagamento de fiado",
-    },
+    await tx.financialTransaction.create({
+      data: {
+        barbershopId,
+        amount,
+        type: "DEBT_PAYMENT",
+        description: "Pagamento de fiado",
+        bookingId: finalBookingId,
+        clientName: finalClientName,
+        clientPhone: finalClientPhone,
+      },
+    });
   });
 
-  // =====================================================
-  // REGISTRAR TRANSAÇÃO FINANCEIRA
-  // =====================================================
-
-  await db.financialTransaction.create({
-    data: {
-      amount,
-      type: "DEBT_PAYMENT",
-      description: "Pagamento de fiado",
-      bookingId: finalBookingId,
-      clientName: finalClientName,
-      clientPhone: finalClientPhone,
-    },
-  });
-
-  // =====================================================
-  // NOVO SALDO
-  // =====================================================
-
-  const remainingAmount = totalDebt - amount;
-
-  // =====================================================
-  // ATUALIZAR DASHBOARD
-  // =====================================================
-
+  // 12. Atualizar dashboard
   revalidatePath("/barbeiro/dashboard");
 
-  // =====================================================
-  // RETORNO
-  // =====================================================
-
+  // 13. Retornar valores
   return {
     success: true,
     paidAmount: amount,
-    remainingAmount,
+    remainingAmount: totalDebt - amount,
   };
 };

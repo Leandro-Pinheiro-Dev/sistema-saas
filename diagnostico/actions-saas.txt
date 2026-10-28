@@ -1,0 +1,1657 @@
+===== app/_actions/create-booking.ts =====
+"use server";
+
+import { getServerSession } from "next-auth";
+import { revalidatePath } from "next/cache";
+
+import { authOptions } from "@/lib/auth";
+import { db } from "@/lib/prisma";
+import { calculateBookingDiscount } from "@/app/utils/booking-discount";
+import {
+  getPricedBookingServices,
+  isHaircutService,
+} from "@/app/utils/booking-pricing";
+import { validateBusinessSchedule } from "@/lib/business-schedule";
+import { sendPushNotification } from "@/lib/push";
+
+interface CreateBookingParams {
+  serviceIds: string[];
+  date: string;
+  time: string;
+  isChild?: boolean;
+}
+
+export const createBooking = async ({
+  serviceIds,
+  date,
+  time,
+  isChild = false,
+}: CreateBookingParams) => {
+  // =====================================================
+  // 1. VERIFICAR AUTENTICAÇÃO
+  // =====================================================
+
+  const session = await getServerSession(authOptions);
+
+  if (!session?.user?.id) {
+    throw new Error("Usuário não autenticado.");
+  }
+
+  // =====================================================
+  // 2. VALIDAR SERVIÇOS
+  // =====================================================
+
+  if (!Array.isArray(serviceIds) || serviceIds.length === 0) {
+    throw new Error("Selecione pelo menos um serviço.");
+  }
+
+  // Remove serviços duplicados.
+  const uniqueServiceIds = [...new Set(serviceIds)];
+
+  // =====================================================
+  // 3. VALIDAR DATA
+  // =====================================================
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    throw new Error("Data inválida.");
+  }
+
+  const [year, month, day] = date.split("-").map(Number);
+
+  if (
+    Number.isNaN(year) ||
+    Number.isNaN(month) ||
+    Number.isNaN(day) ||
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > 31
+  ) {
+    throw new Error("Data inválida.");
+  }
+
+  // =====================================================
+  // 4. VALIDAR SE A DATA REALMENTE EXISTE
+  // =====================================================
+  //
+  // Usamos UTC ao meio-dia para evitar problemas de fuso
+  // ao descobrir o dia da semana.
+
+  const dateForDayOfWeek = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+
+  if (Number.isNaN(dateForDayOfWeek.getTime())) {
+    throw new Error("Data inválida.");
+  }
+
+  // Impede datas inexistentes como:
+  // 31/02/2026
+  // 31/04/2026
+  // etc.
+  if (
+    dateForDayOfWeek.getUTCFullYear() !== year ||
+    dateForDayOfWeek.getUTCMonth() !== month - 1 ||
+    dateForDayOfWeek.getUTCDate() !== day
+  ) {
+    throw new Error("Data inválida.");
+  }
+
+  // =====================================================
+  // 5. VALIDAR HORÁRIO
+  // =====================================================
+
+  if (!/^\d{2}:\d{2}$/.test(time)) {
+    throw new Error("Horário inválido.");
+  }
+
+  const [hours, minutes] = time.split(":").map(Number);
+
+  if (
+    Number.isNaN(hours) ||
+    Number.isNaN(minutes) ||
+    hours < 0 ||
+    hours > 23 ||
+    minutes < 0 ||
+    minutes > 59
+  ) {
+    throw new Error("Horário inválido.");
+  }
+
+  // =====================================================
+  // 6. DESCOBRIR O DIA DA SEMANA
+  // =====================================================
+
+  const dayOfWeek = dateForDayOfWeek.getUTCDay();
+
+  // =====================================================
+  // 7. BUSCAR OS SERVIÇOS NO BANCO
+  // =====================================================
+
+  const services = await db.barbershopService.findMany({
+    where: {
+      id: {
+        in: uniqueServiceIds,
+      },
+    },
+  });
+
+  if (services.length !== uniqueServiceIds.length) {
+    throw new Error("Um ou mais serviços não foram encontrados.");
+  }
+
+  // =====================================================
+  // 8. GARANTIR QUE OS SERVIÇOS SÃO DA MESMA BARBEARIA
+  // =====================================================
+
+  const barbershopId = services[0].barbershopId;
+
+  const allFromSameBarbershop = services.every(
+    (service) => service.barbershopId === barbershopId,
+  );
+
+  if (!allFromSameBarbershop) {
+    throw new Error(
+      "Os serviços selecionados pertencem a barbearias diferentes.",
+    );
+  }
+
+  // =====================================================
+  // 9. VALIDAR DATA ATUAL NO HORÁRIO DE SÃO PAULO
+  // =====================================================
+  //
+  // A aplicação trabalha com America/Sao_Paulo.
+  //
+  // Não utilizamos apenas new Date().getDate(), porque
+  // o ambiente da Vercel pode trabalhar em UTC.
+
+  const now = new Date();
+
+  const saoPauloParts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+
+  const currentYear = Number(
+    saoPauloParts.find((part) => part.type === "year")?.value,
+  );
+
+  const currentMonth = Number(
+    saoPauloParts.find((part) => part.type === "month")?.value,
+  );
+
+  const currentDay = Number(
+    saoPauloParts.find((part) => part.type === "day")?.value,
+  );
+
+  // Impede agendamento em datas passadas.
+  if (
+    year < currentYear ||
+    (year === currentYear && month < currentMonth) ||
+    (year === currentYear && month === currentMonth && day < currentDay)
+  ) {
+    throw new Error("Não é possível realizar agendamento em uma data passada.");
+  }
+
+  // =====================================================
+  // 10. VALIDAR MÊS DA AGENDA
+  // =====================================================
+  //
+  // Hierarquia:
+  //
+  // MÊS
+  //   ↓
+  // DIA
+  //   ↓
+  // HORÁRIO
+  //
+  // O cliente somente pode agendar se o mês estiver
+  // explicitamente liberado pelo barbeiro.
+
+  const businessMonth = await db.businessMonth.findUnique({
+    where: {
+      barbershopId_year_month: {
+        barbershopId,
+        year,
+        month,
+      },
+    },
+  });
+
+  if (!businessMonth) {
+    throw new Error("Este mês ainda não foi liberado para novos agendamentos.");
+  }
+
+  if (!businessMonth.active) {
+    throw new Error("Este mês está bloqueado para novos agendamentos.");
+  }
+
+  // =====================================================
+  // 11. VALIDAR REGRA DE CORTE INFANTIL
+  // =====================================================
+
+  const hasHaircut = services.some((service) => isHaircutService(service.name));
+
+  if (isChild && !hasHaircut) {
+    throw new Error(
+      "O preço infantil só pode ser aplicado ao Corte de Cabelo.",
+    );
+  }
+
+  // =====================================================
+  // 12. VALIDAR AGENDA DA BARBEARIA
+  // =====================================================
+  //
+  // Aqui são verificadas:
+  //
+  // - dia da semana;
+  // - horário;
+  // - BusinessDay;
+  // - BusinessTimeSlot.
+
+  await validateBusinessSchedule({
+    barbershopId,
+    dayOfWeek,
+    time,
+  });
+
+  // =====================================================
+  // 13. DEFINIR USUÁRIO
+  // =====================================================
+
+  const bookingUserId = session.user.id;
+
+  // =====================================================
+  // 14. CALCULAR PREÇOS
+  // =====================================================
+
+  const pricedServices = getPricedBookingServices(
+    services.map((service) => ({
+      id: service.id,
+      name: service.name,
+      price: Number(service.price),
+    })),
+    isChild,
+  );
+
+  // =====================================================
+  // 15. CALCULAR DESCONTO
+  // =====================================================
+
+  const discountResult = calculateBookingDiscount(
+    pricedServices.map((service) => ({
+      name: service.name,
+      price: service.price,
+    })),
+  );
+
+  // =====================================================
+  // 16. VERIFICAR HORÁRIO FIXO
+  // =====================================================
+  //
+  // FixedSchedule continua funcionando normalmente.
+  //
+  // Uma exceção libera o horário para uma determinada data.
+
+  const fixedSchedule = await db.fixedSchedule.findFirst({
+    where: {
+      barbershopId,
+      dayOfWeek,
+      time,
+      active: true,
+    },
+  });
+
+  if (fixedSchedule) {
+    const fixedScheduleException = await db.fixedScheduleException.findUnique({
+      where: {
+        barbershopId_date_time: {
+          barbershopId,
+          date: new Date(Date.UTC(year, month - 1, day)),
+          time,
+        },
+      },
+    });
+
+    if (!fixedScheduleException) {
+      throw new Error(
+        `Este horário já está reservado para ${fixedSchedule.clientName}.`,
+      );
+    }
+  }
+
+  // =====================================================
+  // 17. CRIAR DATA COMPLETA DO AGENDAMENTO
+  // =====================================================
+  //
+  // O horário da barbearia é São Paulo (UTC-3).
+
+  const bookingDate = new Date(`${date}T${time}:00-03:00`);
+
+  if (Number.isNaN(bookingDate.getTime())) {
+    throw new Error("Não foi possível criar a data do agendamento.");
+  }
+
+  // =====================================================
+  // 18. VERIFICAR HORÁRIO JÁ OCUPADO
+  // =====================================================
+
+  const slotStart = new Date(bookingDate);
+
+  slotStart.setSeconds(0, 0);
+
+  const slotEnd = new Date(slotStart);
+
+  slotEnd.setMinutes(slotEnd.getMinutes() + 1);
+
+  const existingBooking = await db.booking.findFirst({
+    where: {
+      date: {
+        gte: slotStart,
+        lt: slotEnd,
+      },
+
+      status: {
+        in: ["PENDING", "CONFIRMED"],
+      },
+    },
+  });
+
+  if (existingBooking) {
+    throw new Error("Este horário já está reservado por outro cliente.");
+  }
+
+  // =====================================================
+  // 19. CRIAR AGENDAMENTO
+  // =====================================================
+
+  const booking = await db.booking.create({
+    data: {
+      userId: bookingUserId,
+
+      // Campo legado mantido para compatibilidade.
+      serviceId: uniqueServiceIds[0],
+
+      date: bookingDate,
+
+      status: "PENDING",
+
+      subtotal: discountResult.subtotal,
+      discount: discountResult.discount,
+      total: discountResult.total,
+
+      bookingItems: {
+        create: pricedServices.map((service) => ({
+          serviceId: service.id,
+          price: service.price,
+        })),
+      },
+    },
+
+    include: {
+      bookingItems: {
+        include: {
+          service: true,
+        },
+      },
+    },
+  });
+
+  // =====================================================
+  // 20. ENVIAR PUSH PARA O BARBEIRO
+  // =====================================================
+
+  try {
+    const barbers = await db.user.findMany({
+      where: {
+        role: "BARBER",
+      },
+
+      select: {
+        id: true,
+        pushSubscriptions: true,
+      },
+    });
+
+    const clientName = session.user.name?.trim() || "Um cliente";
+
+    const servicesText = services.map((service) => service.name).join(" + ");
+
+    const formattedDate = new Intl.DateTimeFormat("pt-BR", {
+      timeZone: "America/Sao_Paulo",
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+    }).format(bookingDate);
+
+    for (const barber of barbers) {
+      for (const subscription of barber.pushSubscriptions) {
+        try {
+          await sendPushNotification(subscription, {
+            title: "Novo agendamento ✂️",
+
+            body: `${clientName} agendou ${servicesText} para ${formattedDate} às ${time}.`,
+
+            url: "/barbeiro/dashboard",
+          });
+
+          console.log(`Push enviado para o barbeiro ${barber.id}.`);
+        } catch (error: unknown) {
+          console.error(
+            `Erro ao enviar Push para o barbeiro ${barber.id}:`,
+            error,
+          );
+
+          const statusCode =
+            typeof error === "object" &&
+            error !== null &&
+            "statusCode" in error &&
+            typeof error.statusCode === "number"
+              ? error.statusCode
+              : undefined;
+
+          /**
+           * 404 / 410 normalmente significam que a
+           * subscription deixou de ser válida.
+           *
+           * Nesse caso removemos do banco.
+           */
+          if (statusCode === 404 || statusCode === 410) {
+            try {
+              await db.pushSubscription.delete({
+                where: {
+                  id: subscription.id,
+                },
+              });
+
+              console.log(`PushSubscription ${subscription.id} removida.`);
+            } catch (deleteError) {
+              console.error(
+                "Erro ao remover PushSubscription expirada:",
+                deleteError,
+              );
+            }
+          }
+        }
+      }
+    }
+  } catch (error) {
+    /**
+     * Falha na notificação NÃO deve cancelar
+     * um agendamento que já foi criado.
+     */
+    console.error("Erro geral ao enviar notificação para o barbeiro:", error);
+  }
+
+  // =====================================================
+  // 21. ATUALIZAR PÁGINAS
+  // =====================================================
+
+  revalidatePath("/");
+  revalidatePath("/bookings");
+  revalidatePath("/barbeiro/dashboard");
+
+  // =====================================================
+  // 22. RETORNAR RESULTADO
+  // =====================================================
+
+  return {
+    success: true,
+
+    bookingId: booking.id,
+
+    subtotal: discountResult.subtotal,
+    discount: discountResult.discount,
+    total: discountResult.total,
+
+    discountDescription: discountResult.description,
+  };
+};
+
+===== app/_actions/create-booking-by-barber.ts =====
+"use server";
+
+import { authOptions } from "@/lib/auth";
+import { db } from "@/lib/prisma";
+import { calculateBookingDiscount } from "@/app/utils/booking-discount";
+import {
+  getPricedBookingServices,
+  isHaircutService,
+} from "@/app/utils/booking-pricing";
+import { validateBusinessSchedule } from "@/lib/business-schedule";
+import { getServerSession } from "next-auth";
+import { revalidatePath } from "next/cache";
+
+interface CreateBookingByBarberParams {
+  // =====================================================
+  // SERVIÇOS
+  // =====================================================
+
+  serviceIds: string[];
+
+  // =====================================================
+  // DATA E HORÁRIO
+  // =====================================================
+
+  date: string;
+  time: string;
+
+  // =====================================================
+  // CLIENTE
+  // =====================================================
+
+  userId?: string;
+  clientName?: string;
+  clientPhone?: string;
+
+  // =====================================================
+  // CORTE INFANTIL
+  // =====================================================
+
+  isChild?: boolean;
+}
+
+export const createBookingByBarber = async ({
+  serviceIds,
+  date,
+  time,
+  userId,
+  clientName,
+  clientPhone,
+  isChild = false,
+}: CreateBookingByBarberParams) => {
+  // =====================================================
+  // 1. AUTENTICAÇÃO
+  // =====================================================
+
+  const session = await getServerSession(authOptions);
+
+  if (!session?.user?.id) {
+    throw new Error("Usuário não autenticado.");
+  }
+
+  // =====================================================
+  // 2. SOMENTE BARBEIRO PODE CRIAR PELO PAINEL
+  // =====================================================
+
+  if (session.user.role !== "BARBER") {
+    throw new Error("Apenas o barbeiro pode criar agendamentos.");
+  }
+
+  // =====================================================
+  // 3. VALIDAR SERVIÇOS
+  // =====================================================
+
+  if (!Array.isArray(serviceIds) || serviceIds.length === 0) {
+    throw new Error("Selecione pelo menos um serviço.");
+  }
+
+  // Remove serviços duplicados.
+  const uniqueServiceIds = [...new Set(serviceIds)];
+
+  // =====================================================
+  // 4. VALIDAR DATA
+  // =====================================================
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    throw new Error("Data inválida.");
+  }
+
+  // =====================================================
+  // 5. VALIDAR HORÁRIO
+  // =====================================================
+
+  if (!/^\d{2}:\d{2}$/.test(time)) {
+    throw new Error("Horário inválido.");
+  }
+
+  const [hours, minutes] = time.split(":").map(Number);
+
+  if (
+    Number.isNaN(hours) ||
+    Number.isNaN(minutes) ||
+    hours < 0 ||
+    hours > 23 ||
+    minutes < 0 ||
+    minutes > 59
+  ) {
+    throw new Error("Horário inválido.");
+  }
+
+  // =====================================================
+  // 6. DESCOBRIR O DIA DA SEMANA
+  // =====================================================
+
+  // Usamos UTC ao meio-dia somente para descobrir
+  // corretamente o dia da semana da DATA CIVIL.
+  //
+  // Domingo = 0
+  // Segunda = 1
+  // Terça = 2
+  // Quarta = 3
+  // Quinta = 4
+  // Sexta = 5
+  // Sábado = 6
+
+  const [year, month, day] = date.split("-").map(Number);
+
+  const dateForDayOfWeek = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+
+  if (Number.isNaN(dateForDayOfWeek.getTime())) {
+    throw new Error("Data inválida.");
+  }
+
+  const dayOfWeek = dateForDayOfWeek.getUTCDay();
+
+  // =====================================================
+  // 7. BUSCAR TODOS OS SERVIÇOS
+  // =====================================================
+
+  const services = await db.barbershopService.findMany({
+    where: {
+      id: {
+        in: uniqueServiceIds,
+      },
+    },
+  });
+
+  // Verifica se todos os serviços existem.
+  if (services.length !== uniqueServiceIds.length) {
+    throw new Error("Um ou mais serviços não foram encontrados.");
+  }
+
+  // =====================================================
+  // 8. GARANTIR QUE TODOS PERTENCEM À MESMA BARBEARIA
+  // =====================================================
+
+  const barbershopId = services[0].barbershopId;
+
+  const allFromSameBarbershop = services.every(
+    (service) => service.barbershopId === barbershopId,
+  );
+
+  if (!allFromSameBarbershop) {
+    throw new Error(
+      "Os serviços selecionados pertencem a barbearias diferentes.",
+    );
+  }
+
+  // =====================================================
+  // 9. VALIDAR CORTE INFANTIL
+  // =====================================================
+
+  // O preço infantil só pode ser usado quando existe
+  // Corte de Cabelo entre os serviços selecionados.
+
+  const hasHaircut = services.some((service) => isHaircutService(service.name));
+
+  if (isChild && !hasHaircut) {
+    throw new Error(
+      "O preço infantil só pode ser aplicado ao Corte de Cabelo.",
+    );
+  }
+
+  // =====================================================
+  // 10. VALIDAR AGENDA DA BARBEARIA
+  // =====================================================
+
+  await validateBusinessSchedule({
+    barbershopId,
+    dayOfWeek,
+    time,
+  });
+
+  // =====================================================
+  // 11. CALCULAR PREÇOS DOS SERVIÇOS
+  // =====================================================
+
+  // Preço normal:
+  //
+  // Corte de Cabelo = R$35
+  //
+  // Preço infantil:
+  //
+  // Corte de Cabelo = R$30
+  //
+  // Os demais serviços continuam com seus preços normais.
+
+  const pricedServices = getPricedBookingServices(
+    services.map((service) => ({
+      id: service.id,
+      name: service.name,
+      price: Number(service.price),
+    })),
+    isChild,
+  );
+
+  // =====================================================
+  // 12. CALCULAR DESCONTO DOS COMBOS
+  // =====================================================
+
+  // O desconto é aplicado DEPOIS do preço infantil.
+  //
+  // Exemplo:
+  //
+  // Corte infantil + Barba
+  //
+  // R$30 + R$35 = R$65
+  //
+  // Combo Corte + Barba = -R$10
+  //
+  // Total = R$55
+
+  const discountResult = calculateBookingDiscount(
+    pricedServices.map((service) => ({
+      name: service.name,
+      price: service.price,
+    })),
+  );
+
+  // =====================================================
+  // 13. DEFINIR TIPO DE CLIENTE
+  // =====================================================
+
+  const hasRegisteredClient = Boolean(userId);
+
+  const hasManualClient = Boolean(clientName?.trim());
+
+  if (!hasRegisteredClient && !hasManualClient) {
+    throw new Error("Selecione um cliente ou informe o cliente manualmente.");
+  }
+
+  if (hasRegisteredClient && hasManualClient) {
+    throw new Error("Escolha apenas um tipo de cliente: cadastrado ou manual.");
+  }
+
+  // =====================================================
+  // 14. CLIENTE CADASTRADO
+  // =====================================================
+
+  if (userId) {
+    const user = await db.user.findUnique({
+      where: {
+        id: userId,
+      },
+    });
+
+    if (!user) {
+      throw new Error("Cliente cadastrado não encontrado.");
+    }
+  }
+
+  // =====================================================
+  // 15. CLIENTE MANUAL
+  // =====================================================
+
+  const normalizedClientName = clientName?.trim() || null;
+
+  const normalizedClientPhone = clientPhone?.trim() || null;
+
+  if (hasManualClient && !normalizedClientName) {
+    throw new Error("Informe o nome do cliente.");
+  }
+
+  // =====================================================
+  // 16. CRIAR DATA COMPLETA
+  // =====================================================
+
+  // A data é criada explicitamente no horário de São Paulo.
+  //
+  // Exemplo:
+  //
+  // 2026-09-18 + 10:00
+  //
+  // vira:
+  //
+  // 18/09/2026 às 10:00 em São Paulo.
+
+  const bookingDate = new Date(`${date}T${time}:00-03:00`);
+
+  if (Number.isNaN(bookingDate.getTime())) {
+    throw new Error("Não foi possível criar a data do agendamento.");
+  }
+
+  // =====================================================
+  // 17. VERIFICAR HORÁRIO FIXO
+  // =====================================================
+
+  const fixedSchedule = await db.fixedSchedule.findFirst({
+    where: {
+      barbershopId,
+      dayOfWeek,
+      time,
+      active: true,
+    },
+  });
+
+  if (fixedSchedule) {
+    throw new Error(
+      `Este horário já está reservado para ${fixedSchedule.clientName}.`,
+    );
+  }
+
+  // =====================================================
+  // 18. VERIFICAR OUTRO AGENDAMENTO
+  // =====================================================
+
+  const slotStart = new Date(bookingDate);
+
+  slotStart.setSeconds(0, 0);
+
+  const slotEnd = new Date(slotStart);
+
+  slotEnd.setMinutes(slotEnd.getMinutes() + 1);
+
+  const existingBooking = await db.booking.findFirst({
+    where: {
+      date: {
+        gte: slotStart,
+        lt: slotEnd,
+      },
+      status: {
+        not: "CANCELLED",
+      },
+    },
+  });
+
+  if (existingBooking) {
+    const existingClient = existingBooking.clientName || "outro cliente";
+
+    throw new Error(`Este horário já está agendado para ${existingClient}.`);
+  }
+
+  // =====================================================
+  // 19. CRIAR AGENDAMENTO
+  // =====================================================
+
+  const booking = await db.booking.create({
+    data: {
+      userId: userId || null,
+
+      clientName: normalizedClientName,
+
+      clientPhone: normalizedClientPhone,
+
+      // Mantemos o primeiro serviço no campo legado.
+      serviceId: uniqueServiceIds[0],
+
+      date: bookingDate,
+
+      status: "PENDING",
+
+      // =================================================
+      // VALORES FINANCEIROS
+      // =================================================
+
+      subtotal: discountResult.subtotal,
+
+      discount: discountResult.discount,
+
+      total: discountResult.total,
+
+      // =================================================
+      // TODOS OS SERVIÇOS
+      // =================================================
+
+      bookingItems: {
+        create: pricedServices.map((service) => ({
+          serviceId: service.id,
+
+          // Guarda o preço REAL cobrado no momento
+          // da criação do agendamento.
+          //
+          // Corte normal:
+          // R$35
+          //
+          // Corte infantil:
+          // R$30
+
+          price: service.price,
+        })),
+      },
+    },
+  });
+
+  // =====================================================
+  // 20. ATUALIZAR PÁGINAS
+  // =====================================================
+
+  revalidatePath("/");
+  revalidatePath("/bookings");
+  revalidatePath("/barbeiro/dashboard");
+
+  // =====================================================
+  // 21. RETORNAR RESULTADO
+  // =====================================================
+
+  return {
+    success: true,
+
+    bookingId: booking.id,
+
+    subtotal: discountResult.subtotal,
+
+    discount: discountResult.discount,
+
+    total: discountResult.total,
+
+    discountDescription: discountResult.description,
+  };
+};
+
+===== app/_actions/create-debt.ts =====
+"use server";
+
+import { getServerSession } from "next-auth";
+import { revalidatePath } from "next/cache";
+
+import { authOptions } from "@/lib/auth";
+import { db } from "@/lib/prisma";
+
+interface CreateDebtParams {
+  userId?: string;
+  bookingId?: string;
+  clientName?: string;
+  clientPhone?: string;
+  amount: number;
+  description?: string;
+}
+
+export const createDebt = async ({
+  userId,
+  bookingId,
+  clientName: inputClientName,
+  clientPhone: inputClientPhone,
+  amount,
+  description,
+}: CreateDebtParams) => {
+  // =====================================================
+  // AUTENTICAÇÃO
+  // =====================================================
+
+  const session = await getServerSession(authOptions);
+
+  if (!session?.user?.id) {
+    throw new Error("Usuário não autenticado.");
+  }
+
+  // =====================================================
+  // AUTORIZAÇÃO
+  // =====================================================
+
+  if (session.user.role !== "BARBER") {
+    throw new Error("Acesso não autorizado.");
+  }
+
+  // =====================================================
+  // VALIDAÇÃO DO VALOR
+  // =====================================================
+
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error("O valor do fiado deve ser maior que zero.");
+  }
+
+  // =====================================================
+  // DADOS DO CLIENTE
+  // =====================================================
+
+  let finalUserId: string | null = userId ?? null;
+
+  let finalClientName: string | null = inputClientName?.trim() || null;
+
+  let finalClientPhone: string | null = inputClientPhone?.trim() || null;
+
+  // =====================================================
+  // CLIENTE CADASTRADO
+  // =====================================================
+
+  if (userId) {
+    const user = await db.user.findUnique({
+      where: {
+        id: userId,
+      },
+      select: {
+        id: true,
+        name: true,
+      },
+    });
+
+    if (!user) {
+      throw new Error("Cliente não encontrado.");
+    }
+
+    finalUserId = user.id;
+
+    if (!finalClientName) {
+      finalClientName = user.name ?? null;
+    }
+  }
+
+  // =====================================================
+  // AGENDAMENTO
+  // =====================================================
+
+  if (bookingId) {
+    const booking = await db.booking.findUnique({
+      where: {
+        id: bookingId,
+      },
+      select: {
+        id: true,
+        userId: true,
+        clientName: true,
+        clientPhone: true,
+      },
+    });
+
+    if (!booking) {
+      throw new Error("Agendamento não encontrado.");
+    }
+
+    // ===================================================
+    // VERIFICAR CONFLITO DE CLIENTE
+    // ===================================================
+
+    if (userId && booking.userId && booking.userId !== userId) {
+      throw new Error("O agendamento não pertence ao cliente informado.");
+    }
+
+    // ===================================================
+    // CLIENTE DO AGENDAMENTO
+    // ===================================================
+
+    if (booking.userId) {
+      finalUserId = booking.userId;
+    }
+
+    if (booking.clientName) {
+      finalClientName = booking.clientName;
+    }
+
+    if (booking.clientPhone) {
+      finalClientPhone = booking.clientPhone;
+    }
+
+    // ===================================================
+    // AGENDAMENTO MANUAL
+    // ===================================================
+
+    if (!booking.userId && !booking.clientName) {
+      throw new Error("O agendamento manual não possui nome de cliente.");
+    }
+  }
+
+  // =====================================================
+  // VALIDAR CLIENTE MANUAL
+  // =====================================================
+
+  if (!finalUserId && !finalClientName) {
+    throw new Error("Informe o nome do cliente manual.");
+  }
+
+  // =====================================================
+  // CRIAR DÉBITO
+  // =====================================================
+
+  await db.customerDebt.create({
+    data: {
+      userId: finalUserId,
+      bookingId: bookingId ?? null,
+      clientName: finalClientName,
+      clientPhone: finalClientPhone,
+      amount,
+      type: "DEBT",
+      description: description?.trim() || null,
+    },
+  });
+
+  // =====================================================
+  // ATUALIZAR DASHBOARD
+  // =====================================================
+
+  revalidatePath("/barbeiro/dashboard");
+
+  return {
+    success: true,
+  };
+};
+
+===== app/_actions/create-payment.ts =====
+"use server";
+
+import { getServerSession } from "next-auth";
+import { revalidatePath } from "next/cache";
+
+import { authOptions } from "@/lib/auth";
+import { db } from "@/lib/prisma";
+
+interface CreatePaymentParams {
+  userId: string;
+  amount: number;
+  description?: string;
+}
+
+export const createPayment = async ({
+  userId,
+  amount,
+  description,
+}: CreatePaymentParams) => {
+  // =====================================================
+  // AUTENTICAÇÃO
+  // =====================================================
+
+  const session = await getServerSession(authOptions);
+
+  if (!session?.user?.id) {
+    throw new Error("Usuário não autenticado.");
+  }
+
+  // =====================================================
+  // AUTORIZAÇÃO
+  // =====================================================
+
+  if (session.user.role !== "BARBER") {
+    throw new Error("Acesso não autorizado.");
+  }
+
+  // =====================================================
+  // VALIDAÇÃO
+  // =====================================================
+
+  if (!userId) {
+    throw new Error("Cliente não informado.");
+  }
+
+  if (amount <= 0) {
+    throw new Error("O valor do pagamento deve ser maior que zero.");
+  }
+
+  // =====================================================
+  // VERIFICAR CLIENTE
+  // =====================================================
+
+  const user = await db.user.findUnique({
+    where: {
+      id: userId,
+    },
+  });
+
+  if (!user) {
+    throw new Error("Cliente não encontrado.");
+  }
+
+  // =====================================================
+  // CALCULAR SALDO ATUAL
+  // =====================================================
+
+  const debts = await db.customerDebt.findMany({
+    where: {
+      userId,
+    },
+    select: {
+      amount: true,
+      type: true,
+    },
+  });
+
+  const currentBalance = debts.reduce((total, debt) => {
+    const value = Number(debt.amount);
+
+    if (debt.type === "DEBT") {
+      return total + value;
+    }
+
+    return total - value;
+  }, 0);
+
+  // =====================================================
+  // IMPEDIR PAGAMENTO MAIOR QUE O FIADO
+  // =====================================================
+
+  if (amount > currentBalance) {
+    throw new Error(
+      `O pagamento não pode ser maior que o saldo devedor de R$ ${currentBalance.toFixed(2)}.`,
+    );
+  }
+
+  // =====================================================
+  // REGISTRAR PAGAMENTO
+  // =====================================================
+
+  await db.customerDebt.create({
+    data: {
+      userId,
+      amount,
+      type: "PAYMENT",
+      description: description ?? "Pagamento de fiado",
+    },
+  });
+
+  // =====================================================
+  // ATUALIZAR DASHBOARD
+  // =====================================================
+
+  revalidatePath("/barbeiro/dashboard");
+
+  return {
+    success: true,
+  };
+};
+
+===== app/_actions/pay-debt.ts =====
+"use server";
+
+import { getServerSession } from "next-auth";
+import { revalidatePath } from "next/cache";
+
+import { authOptions } from "@/lib/auth";
+import { db } from "@/lib/prisma";
+
+interface PayDebtParams {
+  userId?: string | null;
+  bookingId?: string | null;
+  clientName?: string | null;
+  clientPhone?: string | null;
+  amount: number;
+}
+
+/**
+ * Normaliza telefone deixando somente números.
+ *
+ * Exemplos:
+ *
+ * (11) 99999-9999
+ * 11 99999-9999
+ * 11999999999
+ *
+ * Todos viram:
+ *
+ * 11999999999
+ */
+const normalizePhone = (phone?: string | null) => {
+  if (!phone) {
+    return "";
+  }
+
+  return phone.replace(/\D/g, "");
+};
+
+/**
+ * Verifica se o userId representa um cliente manual.
+ *
+ * O sistema utiliza:
+ *
+ * manual:PHONE:11999999999
+ *
+ * como identificador virtual para clientes que não possuem
+ * cadastro de usuário no sistema.
+ */
+const isManualUserId = (userId?: string | null) => {
+  return userId?.startsWith("manual:PHONE:") ?? false;
+};
+
+/**
+ * Extrai o telefone de um identificador manual.
+ *
+ * manual:PHONE:11999999999
+ *
+ * retorna:
+ *
+ * 11999999999
+ */
+const getPhoneFromManualUserId = (userId?: string | null) => {
+  if (!isManualUserId(userId)) {
+    return "";
+  }
+
+  return normalizePhone(userId?.replace("manual:PHONE:", ""));
+};
+
+export const payDebt = async ({
+  userId,
+  bookingId,
+  clientName,
+  clientPhone,
+  amount,
+}: PayDebtParams) => {
+  // =====================================================
+  // AUTENTICAÇÃO
+  // =====================================================
+
+  const session = await getServerSession(authOptions);
+
+  if (!session?.user?.id) {
+    throw new Error("Usuário não autenticado.");
+  }
+
+  // =====================================================
+  // AUTORIZAÇÃO
+  // =====================================================
+
+  if (session.user.role !== "BARBER") {
+    throw new Error("Acesso não autorizado.");
+  }
+
+  // =====================================================
+  // VALIDAÇÃO DO VALOR
+  // =====================================================
+
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error("O valor do pagamento deve ser maior que zero.");
+  }
+
+  // =====================================================
+  // IDENTIFICAÇÃO DO CLIENTE
+  // =====================================================
+
+  if (!userId && !bookingId && !clientName && !clientPhone) {
+    throw new Error("Não foi possível identificar o cliente do pagamento.");
+  }
+
+  // =====================================================
+  // IDENTIFICAR CLIENTE MANUAL
+  // =====================================================
+
+  const manualPhoneFromUserId = getPhoneFromManualUserId(userId);
+
+  const normalizedClientPhone = normalizePhone(clientPhone);
+
+  const manualPhone = manualPhoneFromUserId || normalizedClientPhone;
+
+  const manualClient = isManualUserId(userId);
+
+  // =====================================================
+  // LOCALIZAR AS MOVIMENTAÇÕES
+  // =====================================================
+
+  let transactions;
+
+  // -----------------------------------------------------
+  // CLIENTE MANUAL IDENTIFICADO PELO TELEFONE
+  // -----------------------------------------------------
+
+  if (manualClient) {
+    /**
+     * Não utilizamos:
+     *
+     * where: {
+     *   userId: "manual:PHONE:..."
+     * }
+     *
+     * porque esse valor NÃO é um User.id real.
+     *
+     * Cliente manual possui:
+     *
+     * userId = null
+     */
+
+    const manualTransactions = await db.customerDebt.findMany({
+      where: {
+        userId: null,
+      },
+      select: {
+        id: true,
+        userId: true,
+        bookingId: true,
+        clientName: true,
+        clientPhone: true,
+        amount: true,
+        type: true,
+        description: true,
+        createdAt: true,
+      },
+      orderBy: {
+        createdAt: "asc",
+      },
+    });
+
+    /**
+     * Comparamos o telefone normalizado.
+     *
+     * Isso permite encontrar tanto:
+     *
+     * 11999999999
+     *
+     * quanto:
+     *
+     * (11) 99999-9999
+     */
+    transactions = manualTransactions.filter((transaction) => {
+      const transactionPhone = normalizePhone(transaction.clientPhone);
+
+      return transactionPhone === manualPhone;
+    });
+  }
+
+  // -----------------------------------------------------
+  // CLIENTE CADASTRADO
+  // -----------------------------------------------------
+  else if (userId) {
+    transactions = await db.customerDebt.findMany({
+      where: {
+        userId,
+      },
+      select: {
+        id: true,
+        userId: true,
+        bookingId: true,
+        clientName: true,
+        clientPhone: true,
+        amount: true,
+        type: true,
+        description: true,
+        createdAt: true,
+      },
+      orderBy: {
+        createdAt: "asc",
+      },
+    });
+  }
+
+  // -----------------------------------------------------
+  // AGENDAMENTO MANUAL / BOOKING
+  // -----------------------------------------------------
+  else if (bookingId) {
+    transactions = await db.customerDebt.findMany({
+      where: {
+        bookingId,
+      },
+      select: {
+        id: true,
+        userId: true,
+        bookingId: true,
+        clientName: true,
+        clientPhone: true,
+        amount: true,
+        type: true,
+        description: true,
+        createdAt: true,
+      },
+      orderBy: {
+        createdAt: "asc",
+      },
+    });
+  }
+
+  // -----------------------------------------------------
+  // CLIENTE MANUAL SEM BOOKING
+  // -----------------------------------------------------
+  else {
+    /**
+     * Como o telefone pode estar salvo com diferentes
+     * formatos, primeiro buscamos os clientes manuais
+     * e depois fazemos a comparação normalizada.
+     */
+
+    const manualTransactions = await db.customerDebt.findMany({
+      where: {
+        userId: null,
+      },
+      select: {
+        id: true,
+        userId: true,
+        bookingId: true,
+        clientName: true,
+        clientPhone: true,
+        amount: true,
+        type: true,
+        description: true,
+        createdAt: true,
+      },
+      orderBy: {
+        createdAt: "asc",
+      },
+    });
+
+    transactions = manualTransactions.filter((transaction) => {
+      const sameName =
+        !clientName ||
+        transaction.clientName?.trim().toLowerCase() ===
+          clientName.trim().toLowerCase();
+
+      const samePhone =
+        !normalizedClientPhone ||
+        normalizePhone(transaction.clientPhone) === normalizedClientPhone;
+
+      return sameName && samePhone;
+    });
+  }
+
+  // =====================================================
+  // VERIFICAR SE EXISTEM TRANSAÇÕES
+  // =====================================================
+
+  if (!transactions || transactions.length === 0) {
+    throw new Error("Nenhuma movimentação encontrada para este cliente.");
+  }
+
+  // =====================================================
+  // CALCULAR SALDO
+  // =====================================================
+
+  const totalDebt = transactions.reduce((total, transaction) => {
+    const value = Number(transaction.amount);
+
+    if (transaction.type === "DEBT") {
+      return total + value;
+    }
+
+    if (transaction.type === "PAYMENT") {
+      return total - value;
+    }
+
+    return total;
+  }, 0);
+
+  // =====================================================
+  // VERIFICAR SALDO
+  // =====================================================
+
+  if (totalDebt <= 0) {
+    throw new Error("Este cliente não possui fiado em aberto.");
+  }
+
+  // =====================================================
+  // PAGAMENTO MAIOR QUE A DÍVIDA
+  // =====================================================
+
+  if (amount > totalDebt) {
+    throw new Error(
+      `O pagamento não pode ser maior que a dívida de R$ ${totalDebt.toFixed(
+        2,
+      )}.`,
+    );
+  }
+
+  // =====================================================
+  // ÚLTIMA MOVIMENTAÇÃO
+  // =====================================================
+
+  const lastTransaction = transactions[transactions.length - 1];
+
+  // =====================================================
+  // DEFINIR DADOS DO CLIENTE
+  // =====================================================
+
+  const finalClientName = clientName ?? lastTransaction?.clientName ?? null;
+
+  const finalClientPhone = clientPhone ?? lastTransaction?.clientPhone ?? null;
+
+  // =====================================================
+  // DEFINIR BOOKING
+  // =====================================================
+
+  const finalBookingId = bookingId ?? lastTransaction?.bookingId ?? null;
+
+  // =====================================================
+  // DEFINIR USER ID REAL
+  // =====================================================
+
+  /**
+   * Cliente manual:
+   *
+   * userId = null
+   *
+   * Cliente cadastrado:
+   *
+   * userId = ID real do usuário
+   */
+
+  const finalUserId = manualClient
+    ? null
+    : (userId ?? lastTransaction?.userId ?? null);
+
+  // =====================================================
+  // CRIAR PAGAMENTO DO FIADO
+  // =====================================================
+
+  await db.customerDebt.create({
+    data: {
+      userId: finalUserId,
+      bookingId: finalBookingId,
+      clientName: finalClientName,
+      clientPhone: finalClientPhone,
+      amount,
+      type: "PAYMENT",
+      description: "Pagamento de fiado",
+    },
+  });
+
+  // =====================================================
+  // REGISTRAR TRANSAÇÃO FINANCEIRA
+  // =====================================================
+
+  await db.financialTransaction.create({
+    data: {
+      amount,
+      type: "DEBT_PAYMENT",
+      description: "Pagamento de fiado",
+      bookingId: finalBookingId,
+      clientName: finalClientName,
+      clientPhone: finalClientPhone,
+    },
+  });
+
+  // =====================================================
+  // NOVO SALDO
+  // =====================================================
+
+  const remainingAmount = totalDebt - amount;
+
+  // =====================================================
+  // ATUALIZAR DASHBOARD
+  // =====================================================
+
+  revalidatePath("/barbeiro/dashboard");
+
+  // =====================================================
+  // RETORNO
+  // =====================================================
+
+  return {
+    success: true,
+    paidAmount: amount,
+    remainingAmount,
+  };
+};
+

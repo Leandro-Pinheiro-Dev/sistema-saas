@@ -1,0 +1,457 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =====================================================
+// AUTENTICAÇÃO / NEXTAUTH
+// =====================================================
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String  @map("user_id")
+  type              String
+  provider          String
+  providerAccountId String  @map("provider_account_id")
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique @map("session_token")
+  userId       String   @map("user_id")
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model User {
+  id                 String    @id @default(cuid())
+  name               String?
+  email              String?   @unique
+  emailVerified      DateTime? @map("email_verified")
+  image              String?
+  role               UserRole  @default(CUSTOMER)
+  needsRoleSelection Boolean   @default(true)
+
+  bookings          Booking[]
+  debts             CustomerDebt[]
+  pushSubscriptions PushSubscription[]
+  reviews           Review[]
+  accounts          Account[]
+  sessions          Session[]
+  memberships       Membership[]
+
+  @@map("users")
+}
+
+model VerificationToken {
+  identifier String
+  token      String
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// =====================================================
+// BARBEARIAS / MULTI-TENANT
+// =====================================================
+
+model Barbershop {
+  id           String       @id @default(uuid())
+  name         String
+  businessType BusinessType @default(BARBERSHOP)
+  slug         String       @unique
+  address      String
+  phones       String[]
+  description  String
+  logoUrl      String?
+  bannerUrl    String?
+  imageUrl     String?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  memberships Membership[]
+
+  services          BarbershopService[]
+  businessDays      BusinessDay[]
+  businessMonths    BusinessMonth[]
+  businessTimeSlots BusinessTimeSlot[]
+
+  fixedSchedules          FixedSchedule[]
+  fixedScheduleExceptions FixedScheduleException[]
+
+  bookings              Booking[]
+  reviews               Review[]
+  debts                 CustomerDebt[]
+  financialTransactions FinancialTransaction[]
+
+  subscription Subscription?
+
+  @@index([name])
+}
+
+model Membership {
+  id           String         @id @default(uuid())
+  userId       String
+  barbershopId String
+  role         MembershipRole @default(BARBER)
+  active       Boolean        @default(true)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  barbershop Barbershop @relation(fields: [barbershopId], references: [id], onDelete: Cascade)
+
+  bookings Booking[] @relation("BarberBookings")
+
+  @@unique([userId, barbershopId])
+  @@index([barbershopId])
+  @@index([userId])
+  @@index([barbershopId, role])
+}
+
+model Subscription {
+  id           String             @id @default(uuid())
+  barbershopId String             @unique
+  status       SubscriptionStatus @default(TRIAL)
+
+  // Quantidade de pessoas ativas, incluindo o proprietário
+  memberCount Int @default(1)
+
+  // Valor mensal por pessoa: R$ 70,00
+  pricePerMember Decimal @default(70.00) @db.Decimal(10, 2)
+
+  // Valor mensal total da assinatura
+  totalAmount Decimal @default(70.00) @db.Decimal(10, 2)
+
+  startedAt        DateTime  @default(now())
+  currentPeriodEnd DateTime?
+  canceledAt       DateTime?
+
+  // Dados do provedor de pagamento
+  provider               String?
+  providerCustomerId     String?
+  providerSubscriptionId String?
+  providerCheckoutId     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  barbershop Barbershop @relation(fields: [barbershopId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@index([providerSubscriptionId])
+}
+
+// =====================================================
+// SERVIÇOS
+// =====================================================
+
+model BarbershopService {
+  id              String   @id @default(uuid())
+  name            String
+  description     String
+  imageUrl        String
+  price           Decimal  @db.Decimal(10, 2)
+  durationMinutes Int      @default(30)
+  barbershopId    String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  barbershop   Barbershop       @relation(fields: [barbershopId], references: [id], onDelete: Cascade)
+  bookings     Booking[]
+  bookingItems BookingService[]
+
+  @@index([barbershopId])
+}
+
+// =====================================================
+// CONFIGURAÇÃO DA AGENDA
+// =====================================================
+
+model BusinessDay {
+  id           String   @id @default(uuid())
+  barbershopId String
+  dayOfWeek    Int
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  barbershop Barbershop @relation(fields: [barbershopId], references: [id], onDelete: Cascade)
+
+  @@unique([barbershopId, dayOfWeek])
+  @@index([barbershopId])
+}
+
+model BusinessTimeSlot {
+  id           String   @id @default(uuid())
+  barbershopId String
+  dayOfWeek    Int
+  time         String
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  barbershop Barbershop @relation(fields: [barbershopId], references: [id], onDelete: Cascade)
+
+  @@unique([barbershopId, dayOfWeek, time])
+  @@index([barbershopId, dayOfWeek])
+}
+
+model BusinessMonth {
+  id           String   @id @default(uuid())
+  barbershopId String
+  year         Int
+  month        Int
+  active       Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  barbershop Barbershop @relation(fields: [barbershopId], references: [id], onDelete: Cascade)
+
+  @@unique([barbershopId, year, month])
+  @@index([barbershopId])
+}
+
+// =====================================================
+// CLIENTES COM HORÁRIO FIXO
+// =====================================================
+
+model FixedSchedule {
+  id           String   @id @default(uuid())
+  barbershopId String
+  clientName   String
+  dayOfWeek    Int
+  time         String
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  barbershop Barbershop @relation(fields: [barbershopId], references: [id], onDelete: Cascade)
+
+  @@unique([barbershopId, dayOfWeek, time])
+  @@index([barbershopId])
+}
+
+model FixedScheduleException {
+  id           String   @id @default(uuid())
+  barbershopId String
+  date         DateTime @db.Date
+  time         String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  barbershop Barbershop @relation(fields: [barbershopId], references: [id], onDelete: Cascade)
+
+  @@unique([barbershopId, date, time])
+  @@index([barbershopId, date])
+}
+
+// =====================================================
+// AGENDAMENTOS
+// =====================================================
+
+model Booking {
+  id                 String        @id @default(uuid())
+  userId             String?
+  serviceId          String
+  barbershopId       String
+  barberMembershipId String?
+  date               DateTime
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+  status             BookingStatus @default(PENDING)
+  clientName         String?
+  clientPhone        String?
+  reminderSent       Boolean       @default(false)
+  reminderSentAt     DateTime?
+  subtotal           Decimal       @default(0) @db.Decimal(10, 2)
+  discount           Decimal       @default(0) @db.Decimal(10, 2)
+  total              Decimal       @default(0) @db.Decimal(10, 2)
+
+  barbershop       Barbershop        @relation(fields: [barbershopId], references: [id], onDelete: Cascade)
+  service          BarbershopService @relation(fields: [serviceId], references: [id])
+  user             User?             @relation(fields: [userId], references: [id])
+  barberMembership Membership?       @relation("BarberBookings", fields: [barberMembershipId], references: [id])
+
+  bookingItems          BookingService[]
+  debts                 CustomerDebt[]
+  financialTransactions FinancialTransaction[]
+
+  @@index([barbershopId])
+  @@index([barberMembershipId])
+  @@index([date])
+  @@index([reminderSent, date])
+}
+
+model BookingService {
+  id        String   @id @default(uuid())
+  bookingId String
+  serviceId String
+  price     Decimal  @db.Decimal(10, 2)
+  createdAt DateTime @default(now())
+
+  booking Booking           @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  service BarbershopService @relation(fields: [serviceId], references: [id])
+
+  @@unique([bookingId, serviceId])
+  @@index([bookingId])
+  @@index([serviceId])
+}
+
+// =====================================================
+// FIADO / DÍVIDAS
+// =====================================================
+
+model CustomerDebt {
+  id           String   @id @default(uuid())
+  userId       String?
+  bookingId    String?
+  barbershopId String
+  amount       Decimal  @db.Decimal(10, 2)
+  type         DebtType
+  description  String?
+  createdAt    DateTime @default(now())
+  clientName   String?
+  clientPhone  String?
+
+  barbershop Barbershop @relation(fields: [barbershopId], references: [id], onDelete: Cascade)
+  booking    Booking?   @relation(fields: [bookingId], references: [id])
+  user       User?      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  financialTransactions FinancialTransaction[]
+
+  @@index([barbershopId])
+  @@index([userId])
+  @@index([bookingId])
+}
+
+// =====================================================
+// FINANCEIRO
+// =====================================================
+
+model FinancialTransaction {
+  id             String                   @id @default(uuid())
+  amount         Decimal                  @db.Decimal(10, 2)
+  type           FinancialTransactionType
+  description    String?
+  barbershopId   String
+  bookingId      String?
+  customerDebtId String?
+  clientName     String?
+  clientPhone    String?
+  createdAt      DateTime                 @default(now())
+
+  barbershop   Barbershop    @relation(fields: [barbershopId], references: [id], onDelete: Cascade)
+  booking      Booking?      @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  customerDebt CustomerDebt? @relation(fields: [customerDebtId], references: [id], onDelete: SetNull)
+
+  @@index([barbershopId])
+  @@index([createdAt])
+  @@index([type])
+  @@index([bookingId])
+  @@index([customerDebtId])
+}
+
+// =====================================================
+// AVALIAÇÕES
+// =====================================================
+
+model Review {
+  id           String   @id @default(cuid())
+  rating       Int
+  comment      String?
+  createdAt    DateTime @default(now())
+  userId       String
+  barbershopId String
+
+  barbershop Barbershop @relation(fields: [barbershopId], references: [id], onDelete: Cascade)
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, barbershopId])
+  @@index([barbershopId])
+}
+
+// =====================================================
+// NOTIFICAÇÕES PUSH
+// =====================================================
+
+model PushSubscription {
+  id        String   @id @default(uuid())
+  userId    String
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// =====================================================
+// ENUMS
+// =====================================================
+
+enum UserRole {
+  CUSTOMER
+  BARBER
+}
+
+enum MembershipRole {
+  OWNER
+  BARBER
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  COMPLETED
+  CANCELLED
+}
+
+enum DebtType {
+  DEBT
+  PAYMENT
+}
+
+enum FinancialTransactionType {
+  SERVICE_PAYMENT
+  DEBT_PAYMENT
+}
+
+enum SubscriptionStatus {
+  TRIAL
+  ACTIVE
+  PAST_DUE
+  SUSPENDED
+  CANCELED
+}
+
+enum BusinessType {
+  BARBERSHOP
+  NAIL_SALON
+  EYEBROW_DESIGN
+  BEAUTY_SALON
+  OTHER
+}

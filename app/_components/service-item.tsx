@@ -14,6 +14,7 @@ interface Service {
   description: string;
   imageUrl: string;
   price: number;
+  durationMinutes: number;
   barbershopId: string;
   createdAt: Date;
   updatedAt: Date;
@@ -48,6 +49,7 @@ const ServiceItem = ({ service }: ServiceItemProps) => {
       id: service.id,
       name: service.name,
       price: Number(service.price),
+      durationMinutes: service.durationMinutes,
     });
 
     toast.success(`${service.name} adicionado ao carrinho.`);

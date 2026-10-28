@@ -8,7 +8,7 @@ datasource db {
 }
 
 // =====================================================
-// AUTH / NEXTAUTH
+// AUTENTICAÇÃO / NEXTAUTH
 // =====================================================
 
 model Account {
@@ -53,10 +53,11 @@ model User {
 
   bookings          Booking[]
   debts             CustomerDebt[]
+  pushSubscriptions PushSubscription[]
   reviews           Review[]
   accounts          Account[]
   sessions          Session[]
-  pushSubscriptions PushSubscription[]
+  memberships       Membership[]
 
   @@map("users")
 }
@@ -71,30 +72,91 @@ model VerificationToken {
 }
 
 // =====================================================
-// BARBEARIA
+// BARBEARIAS / MULTI-TENANT
 // =====================================================
 
 model Barbershop {
-  id          String   @id @default(uuid())
-  name        String   @unique
-  address     String
-  phones      String[]
-  description String
-  imageUrl    String
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id           String       @id @default(uuid())
+  name         String
+  businessType BusinessType @default(BARBERSHOP)
+  slug         String       @unique
+  address      String
+  phones       String[]
+  description  String
+  logoUrl      String?
+  bannerUrl    String?
+  imageUrl     String?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
 
-  services BarbershopService[]
+  memberships Membership[]
 
-  fixedSchedules FixedSchedule[]
-
-  fixedScheduleExceptions FixedScheduleException[]
-
+  services          BarbershopService[]
   businessDays      BusinessDay[]
+  businessMonths    BusinessMonth[]
   businessTimeSlots BusinessTimeSlot[]
 
-  reviews        Review[]
-  businessMonths BusinessMonth[]
+  bookings              Booking[]
+  reviews               Review[]
+  debts                 CustomerDebt[]
+  financialTransactions FinancialTransaction[]
+
+  subscription Subscription?
+
+  @@index([name])
+}
+
+model Membership {
+  id           String         @id @default(uuid())
+  userId       String
+  barbershopId String
+  role         MembershipRole @default(BARBER)
+  active       Boolean        @default(true)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  barbershop Barbershop @relation(fields: [barbershopId], references: [id], onDelete: Cascade)
+
+  bookings Booking[] @relation("BarberBookings")
+
+  @@unique([userId, barbershopId])
+  @@index([barbershopId])
+  @@index([userId])
+  @@index([barbershopId, role])
+}
+
+model Subscription {
+  id           String             @id @default(uuid())
+  barbershopId String             @unique
+  status       SubscriptionStatus @default(TRIAL)
+
+  // Quantidade de pessoas ativas, incluindo o proprietário
+  memberCount Int @default(1)
+
+  // Valor mensal por pessoa: R$ 70,00
+  pricePerMember Decimal @default(70.00) @db.Decimal(10, 2)
+
+  // Valor mensal total da assinatura
+  totalAmount Decimal @default(70.00) @db.Decimal(10, 2)
+
+  startedAt        DateTime  @default(now())
+  currentPeriodEnd DateTime?
+  canceledAt       DateTime?
+
+  // Dados do provedor de pagamento
+  provider               String?
+  providerCustomerId     String?
+  providerSubscriptionId String?
+  providerCheckoutId     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  barbershop Barbershop @relation(fields: [barbershopId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@index([providerSubscriptionId])
 }
 
 // =====================================================
@@ -102,37 +164,26 @@ model Barbershop {
 // =====================================================
 
 model BarbershopService {
-  id           String   @id @default(uuid())
-  name         String
-  description  String
-  imageUrl     String
-  price        Decimal  @db.Decimal(10, 2)
-  barbershopId String
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id              String   @id @default(uuid())
+  name            String
+  description     String
+  imageUrl        String
+  price           Decimal  @db.Decimal(10, 2)
+  durationMinutes Int      @default(30)
+  barbershopId    String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
-  barbershop   Barbershop       @relation(fields: [barbershopId], references: [id])
+  barbershop   Barbershop       @relation(fields: [barbershopId], references: [id], onDelete: Cascade)
   bookings     Booking[]
   bookingItems BookingService[]
+
+  @@index([barbershopId])
 }
 
 // =====================================================
-// CONFIGURAÇÃO DOS DIAS
+// CONFIGURAÇÃO DA AGENDA
 // =====================================================
-//
-// 0 = Domingo
-// 1 = Segunda
-// 2 = Terça
-// 3 = Quarta
-// 4 = Quinta
-// 5 = Sexta
-// 6 = Sábado
-//
-// active = true  -> aberto
-// active = false -> fechado
-//
-// Não interfere nos clientes fixos.
-//
 
 model BusinessDay {
   id           String   @id @default(uuid())
@@ -148,21 +199,6 @@ model BusinessDay {
   @@index([barbershopId])
 }
 
-// =====================================================
-// CONFIGURAÇÃO DOS HORÁRIOS
-// =====================================================
-//
-// Controla cada horário individualmente.
-//
-// Exemplo:
-//
-// Sexta 08:00 -> ativo
-// Sexta 09:00 -> ativo
-// Sexta 15:00 -> bloqueado
-//
-// Não interfere diretamente no FixedSchedule.
-//
-
 model BusinessTimeSlot {
   id           String   @id @default(uuid())
   barbershopId String
@@ -177,32 +213,6 @@ model BusinessTimeSlot {
   @@unique([barbershopId, dayOfWeek, time])
   @@index([barbershopId, dayOfWeek])
 }
-
-// =====================================================
-// MESES DISPONÍVEIS PARA AGENDAMENTO
-// =====================================================
-//
-// Controla quais meses podem receber agendamentos.
-//
-// active = true  -> mês liberado
-// active = false -> mês bloqueado
-//
-// A regra de disponibilidade fica:
-//
-// MÊS
-//   ↓
-// DIA DA SEMANA
-//   ↓
-// HORÁRIO
-//
-// Exemplo:
-//
-// Setembro/2026 -> liberado
-// Outubro/2026  -> bloqueado
-//
-// Mesmo que terça-feira esteja aberta e 08:00 esteja
-// ativo, um mês bloqueado não permite agendamento.
-//
 
 model BusinessMonth {
   id           String   @id @default(uuid())
@@ -224,40 +234,37 @@ model BusinessMonth {
 // =====================================================
 
 model Booking {
-  id        String        @id @default(uuid())
-  userId    String?
-  serviceId String
-  date      DateTime
-  createdAt DateTime      @default(now())
-  updatedAt DateTime      @updatedAt
-  status    BookingStatus @default(PENDING)
+  id                 String        @id @default(uuid())
+  userId             String?
+  serviceId          String
+  barbershopId       String
+  barberMembershipId String?
+  date               DateTime
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+  status             BookingStatus @default(PENDING)
+  clientName         String?
+  clientPhone        String?
+  reminderSent       Boolean       @default(false)
+  reminderSentAt     DateTime?
+  subtotal           Decimal       @default(0) @db.Decimal(10, 2)
+  discount           Decimal       @default(0) @db.Decimal(10, 2)
+  total              Decimal       @default(0) @db.Decimal(10, 2)
 
-  clientName  String?
-  clientPhone String?
+  barbershop       Barbershop        @relation(fields: [barbershopId], references: [id], onDelete: Cascade)
+  service          BarbershopService @relation(fields: [serviceId], references: [id])
+  user             User?             @relation(fields: [userId], references: [id])
+  barberMembership Membership?       @relation("BarberBookings", fields: [barberMembershipId], references: [id])
 
-  reminderSent   Boolean   @default(false)
-  reminderSentAt DateTime?
-
-  // Valores financeiros oficiais
-  subtotal Decimal @default(0) @db.Decimal(10, 2)
-  discount Decimal @default(0) @db.Decimal(10, 2)
-  total    Decimal @default(0) @db.Decimal(10, 2)
-
-  service      BarbershopService @relation(fields: [serviceId], references: [id])
-  bookingItems BookingService[]
-
-  user User? @relation(fields: [userId], references: [id])
-
+  bookingItems          BookingService[]
   debts                 CustomerDebt[]
   financialTransactions FinancialTransaction[]
 
+  @@index([barbershopId])
+  @@index([barberMembershipId])
   @@index([date])
   @@index([reminderSent, date])
 }
-
-// =====================================================
-// SERVIÇOS DO AGENDAMENTO
-// =====================================================
 
 model BookingService {
   id        String   @id @default(uuid())
@@ -275,71 +282,28 @@ model BookingService {
 }
 
 // =====================================================
-// CLIENTES FIXOS
-// =====================================================
-//
-// Mantemos essa tabela como está.
-// Ela representa clientes com horário fixo.
-//
-
-model FixedSchedule {
-  id           String   @id @default(uuid())
-  barbershopId String
-  clientName   String
-  dayOfWeek    Int
-  time         String
-  active       Boolean  @default(true)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-
-  barbershop Barbershop @relation(fields: [barbershopId], references: [id], onDelete: Cascade)
-
-  @@unique([barbershopId, dayOfWeek, time])
-}
-
-// =====================================================
-// EXCEÇÕES DE CLIENTES FIXOS
-// =====================================================
-//
-// Permite liberar um horário fixo somente em uma data
-// específica.
-//
-
-model FixedScheduleException {
-  id           String   @id @default(uuid())
-  barbershopId String
-  date         DateTime @db.Date
-  time         String
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-
-  barbershop Barbershop @relation(fields: [barbershopId], references: [id], onDelete: Cascade)
-
-  @@unique([barbershopId, date, time])
-  @@index([barbershopId, date])
-}
-
-// =====================================================
 // FIADO / DÍVIDAS
 // =====================================================
 
 model CustomerDebt {
-  id          String   @id @default(uuid())
-  userId      String?
-  bookingId   String?
-  amount      Decimal  @db.Decimal(10, 2)
-  type        DebtType
-  description String?
-  createdAt   DateTime @default(now())
-  clientName  String?
-  clientPhone String?
+  id           String   @id @default(uuid())
+  userId       String?
+  bookingId    String?
+  barbershopId String
+  amount       Decimal  @db.Decimal(10, 2)
+  type         DebtType
+  description  String?
+  createdAt    DateTime @default(now())
+  clientName   String?
+  clientPhone  String?
 
-  booking Booking? @relation(fields: [bookingId], references: [id])
-
-  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+  barbershop Barbershop @relation(fields: [barbershopId], references: [id], onDelete: Cascade)
+  booking    Booking?   @relation(fields: [bookingId], references: [id])
+  user       User?      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   financialTransactions FinancialTransaction[]
 
+  @@index([barbershopId])
   @@index([userId])
   @@index([bookingId])
 }
@@ -353,16 +317,18 @@ model FinancialTransaction {
   amount         Decimal                  @db.Decimal(10, 2)
   type           FinancialTransactionType
   description    String?
+  barbershopId   String
   bookingId      String?
   customerDebtId String?
   clientName     String?
   clientPhone    String?
   createdAt      DateTime                 @default(now())
 
-  booking Booking? @relation(fields: [bookingId], references: [id], onDelete: SetNull)
-
+  barbershop   Barbershop    @relation(fields: [barbershopId], references: [id], onDelete: Cascade)
+  booking      Booking?      @relation(fields: [bookingId], references: [id], onDelete: SetNull)
   customerDebt CustomerDebt? @relation(fields: [customerDebtId], references: [id], onDelete: SetNull)
 
+  @@index([barbershopId])
   @@index([createdAt])
   @@index([type])
   @@index([bookingId])
@@ -382,14 +348,14 @@ model Review {
   barbershopId String
 
   barbershop Barbershop @relation(fields: [barbershopId], references: [id], onDelete: Cascade)
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, barbershopId])
+  @@index([barbershopId])
 }
 
 // =====================================================
-// PUSH NOTIFICATIONS
+// NOTIFICAÇÕES PUSH
 // =====================================================
 
 model PushSubscription {
@@ -415,6 +381,11 @@ enum UserRole {
   BARBER
 }
 
+enum MembershipRole {
+  OWNER
+  BARBER
+}
+
 enum BookingStatus {
   PENDING
   CONFIRMED
@@ -430,4 +401,20 @@ enum DebtType {
 enum FinancialTransactionType {
   SERVICE_PAYMENT
   DEBT_PAYMENT
+}
+
+enum SubscriptionStatus {
+  TRIAL
+  ACTIVE
+  PAST_DUE
+  SUSPENDED
+  CANCELED
+}
+
+enum BusinessType {
+  BARBERSHOP
+  NAIL_SALON
+  EYEBROW_DESIGN
+  BEAUTY_SALON
+  OTHER
 }

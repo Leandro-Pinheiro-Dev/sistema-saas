@@ -1,12 +1,11 @@
 "use client";
 
 import { useState, useTransition } from "react";
-
 import { Pencil, Save, X } from "lucide-react";
 
 import { updateService } from "@/app/_actions/update-service";
-
 import { Button } from "@/app/_components/ui/button";
+import { Input } from "@/app/_components/ui/input";
 
 import {
   Dialog,
@@ -16,51 +15,49 @@ import {
   DialogTrigger,
 } from "@/app/_components/ui/dialog";
 
-import { Input } from "@/app/_components/ui/input";
-
 interface EditServiceButtonProps {
   service: {
     id: string;
     name: string;
     price: number;
+    durationMinutes: number;
   };
 }
 
 const EditServiceButton = ({ service }: EditServiceButtonProps) => {
   const [open, setOpen] = useState(false);
-
   const [name, setName] = useState(service.name);
-
   const [price, setPrice] = useState(
     service.price.toFixed(2).replace(".", ","),
+  );
+  const [durationMinutes, setDurationMinutes] = useState(
+    String(service.durationMinutes),
   );
 
   const [isPending, startTransition] = useTransition();
 
   const handleSave = () => {
-    // =====================================================
-    // CONVERTE O PREÇO
-    // =====================================================
-
     const numericPrice = Number(price.replace(/\./g, "").replace(",", "."));
-
-    // =====================================================
-    // VALIDAÇÃO
-    // =====================================================
+    const numericDuration = Number(durationMinutes);
 
     if (!name.trim()) {
       alert("Informe o nome do serviço.");
       return;
     }
 
-    if (!numericPrice || numericPrice <= 0) {
+    if (!Number.isFinite(numericPrice) || numericPrice <= 0) {
       alert("Informe um preço válido.");
       return;
     }
 
-    // =====================================================
-    // ATUALIZAÇÃO
-    // =====================================================
+    if (
+      !Number.isInteger(numericDuration) ||
+      numericDuration < 5 ||
+      numericDuration > 720
+    ) {
+      alert("Informe uma duração inteira entre 5 e 720 minutos.");
+      return;
+    }
 
     startTransition(async () => {
       try {
@@ -68,12 +65,10 @@ const EditServiceButton = ({ service }: EditServiceButtonProps) => {
           serviceId: service.id,
           name,
           price: numericPrice,
+          durationMinutes: numericDuration,
         });
 
-        // Fecha o modal após salvar
         setOpen(false);
-
-        // Atualiza os dados da página
         window.location.reload();
       } catch (error) {
         console.error(error);
@@ -101,10 +96,6 @@ const EditServiceButton = ({ service }: EditServiceButtonProps) => {
         </DialogHeader>
 
         <div className="space-y-5">
-          {/* =================================================
-              NOME DO SERVIÇO
-          ================================================= */}
-
           <div className="space-y-2">
             <label className="text-sm font-medium">Nome do serviço</label>
 
@@ -115,12 +106,8 @@ const EditServiceButton = ({ service }: EditServiceButtonProps) => {
             />
           </div>
 
-          {/* =================================================
-              PREÇO
-          ================================================= */}
-
           <div className="space-y-2">
-            <label className="text-sm font-medium">Preço</label>
+            <label className="text-sm font-medium">Preço (R$)</label>
 
             <Input
               value={price}
@@ -130,9 +117,23 @@ const EditServiceButton = ({ service }: EditServiceButtonProps) => {
             />
           </div>
 
-          {/* =================================================
-              BOTÕES
-          ================================================= */}
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Duração (minutos)</label>
+
+            <Input
+              type="number"
+              min={5}
+              max={720}
+              step={5}
+              value={durationMinutes}
+              onChange={(event) => setDurationMinutes(event.target.value)}
+              placeholder="30"
+            />
+
+            <p className="text-xs text-muted-foreground">
+              Informe um valor inteiro entre 5 e 720 minutos.
+            </p>
+          </div>
 
           <div className="flex gap-2 pt-2">
             <Button
@@ -151,7 +152,6 @@ const EditServiceButton = ({ service }: EditServiceButtonProps) => {
               disabled={isPending}
             >
               <Save size={17} />
-
               {isPending ? "Salvando..." : "Salvar"}
             </Button>
           </div>

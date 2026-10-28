@@ -1,43 +1,30 @@
+
 "use server";
 
-import { getServerSession } from "next-auth";
-
-import { authOptions } from "@/lib/auth";
-
 import { db } from "@/lib/prisma";
+import { requireBusinessOwner } from "@/lib/permissions/membership";
 
 interface UpdateServiceParams {
   serviceId: string;
   name: string;
   price: number;
+  durationMinutes: number;
 }
 
-export const updateService = async ({
+export async function updateService({
   serviceId,
   name,
   price,
-}: UpdateServiceParams) => {
-  // =====================================================
-  // AUTENTICAÇÃO
-  // =====================================================
-
-  const session = await getServerSession(authOptions);
-
-  if (!session?.user?.id) {
-    throw new Error("Usuário não autenticado.");
+  durationMinutes,
+}: UpdateServiceParams) {
+  // 1. Validar os dados recebidos
+  if (!serviceId?.trim()) {
+    throw new Error("Serviço não informado.");
   }
 
-  // =====================================================
-  // AUTORIZAÇÃO
-  // =====================================================
-
-  if (session.user.role !== "BARBER") {
-    throw new Error("Acesso não autorizado.");
+  if (typeof name !== "string") {
+    throw new Error("Nome do serviço inválido.");
   }
-
-  // =====================================================
-  // VALIDAÇÕES
-  // =====================================================
 
   const trimmedName = name.trim();
 
@@ -45,17 +32,26 @@ export const updateService = async ({
     throw new Error("O nome do serviço é obrigatório.");
   }
 
-  if (price <= 0) {
+  if (!Number.isFinite(price) || price <= 0) {
     throw new Error("O preço deve ser maior que zero.");
   }
 
-  // =====================================================
-  // VERIFICA SE O SERVIÇO EXISTE
-  // =====================================================
+  if (
+    !Number.isInteger(durationMinutes) ||
+    durationMinutes < 5 ||
+    durationMinutes > 720
+  ) {
+    throw new Error(
+      "A duração deve ser um número inteiro entre 5 e 720 minutos.",
+    );
+  }
 
+  // 2. Localizar o serviço e seu estabelecimento
   const service = await db.barbershopService.findUnique({
-    where: {
-      id: serviceId,
+    where: { id: serviceId },
+    select: {
+      id: true,
+      barbershopId: true,
     },
   });
 
@@ -63,30 +59,33 @@ export const updateService = async ({
     throw new Error("Serviço não encontrado.");
   }
 
-  // =====================================================
-  // ATUALIZA O SERVIÇO
-  // =====================================================
+  // 3. Autorizar o proprietário do estabelecimento correto
+  await requireBusinessOwner(service.barbershopId);
 
+  // 4. Atualizar o serviço
   const updatedService = await db.barbershopService.update({
-    where: {
-      id: serviceId,
-    },
+    where: { id: service.id },
     data: {
       name: trimmedName,
       price,
+      durationMinutes,
+    },
+    select: {
+      id: true,
+      name: true,
+      price: true,
+      durationMinutes: true,
     },
   });
 
-  // =====================================================
-  // RETORNO
-  // =====================================================
-
+  // 5. Retornar os dados atualizados
   return {
     success: true,
     service: {
       id: updatedService.id,
       name: updatedService.name,
       price: Number(updatedService.price),
+      durationMinutes: updatedService.durationMinutes,
     },
   };
-};
+}

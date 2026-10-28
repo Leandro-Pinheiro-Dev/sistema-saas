@@ -13,12 +13,12 @@ interface User {
 }
 
 interface AddDebtButtonProps {
+  barbershopId: string;
   users: User[];
 }
-
 type CustomerType = "REGISTERED" | "MANUAL";
 
-const AddDebtButton = ({ users }: AddDebtButtonProps) => {
+const AddDebtButton = ({ barbershopId, users }: AddDebtButtonProps) => {
   const [open, setOpen] = useState(false);
   const [isPending, startTransition] = useTransition();
 
@@ -95,6 +95,7 @@ const AddDebtButton = ({ users }: AddDebtButtonProps) => {
     startTransition(async () => {
       try {
         await createDebt({
+          barbershopId,
           userId: customerType === "REGISTERED" ? userId : undefined,
 
           clientName: customerType === "MANUAL" ? clientName.trim() : undefined,

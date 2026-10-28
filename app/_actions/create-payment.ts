@@ -1,73 +1,53 @@
 "use server";
 
-import { getServerSession } from "next-auth";
 import { revalidatePath } from "next/cache";
 
-import { authOptions } from "@/lib/auth";
 import { db } from "@/lib/prisma";
+import { requireBusinessStaff } from "@/lib/permissions/membership";
 
 interface CreatePaymentParams {
+  barbershopId: string;
   userId: string;
   amount: number;
   description?: string;
 }
 
 export const createPayment = async ({
+  barbershopId,
   userId,
   amount,
   description,
 }: CreatePaymentParams) => {
-  // =====================================================
-  // AUTENTICAÇÃO
-  // =====================================================
-
-  const session = await getServerSession(authOptions);
-
-  if (!session?.user?.id) {
-    throw new Error("Usuário não autenticado.");
+  if (!barbershopId?.trim()) {
+    throw new Error("Estabelecimento não informado.");
   }
 
-  // =====================================================
-  // AUTORIZAÇÃO
-  // =====================================================
-
-  if (session.user.role !== "BARBER") {
-    throw new Error("Acesso não autorizado.");
-  }
-
-  // =====================================================
-  // VALIDAÇÃO
-  // =====================================================
-
-  if (!userId) {
+  if (!userId?.trim()) {
     throw new Error("Cliente não informado.");
   }
 
-  if (amount <= 0) {
+  if (!Number.isFinite(amount) || amount <= 0) {
     throw new Error("O valor do pagamento deve ser maior que zero.");
   }
 
-  // =====================================================
-  // VERIFICAR CLIENTE
-  // =====================================================
+  // Confirma que o usuário possui acesso ativo ao estabelecimento.
+  await requireBusinessStaff(barbershopId);
 
+  // Confirma que o cliente existe.
   const user = await db.user.findUnique({
-    where: {
-      id: userId,
-    },
+    where: { id: userId },
+    select: { id: true },
   });
 
   if (!user) {
     throw new Error("Cliente não encontrado.");
   }
 
-  // =====================================================
-  // CALCULAR SALDO ATUAL
-  // =====================================================
-
+  // Busca somente os fiados deste cliente neste estabelecimento.
   const debts = await db.customerDebt.findMany({
     where: {
       userId,
+      barbershopId,
     },
     select: {
       amount: true,
@@ -78,16 +58,14 @@ export const createPayment = async ({
   const currentBalance = debts.reduce((total, debt) => {
     const value = Number(debt.amount);
 
-    if (debt.type === "DEBT") {
-      return total + value;
-    }
-
-    return total - value;
+    return debt.type === "DEBT" ? total + value : total - value;
   }, 0);
 
-  // =====================================================
-  // IMPEDIR PAGAMENTO MAIOR QUE O FIADO
-  // =====================================================
+  if (currentBalance <= 0) {
+    throw new Error(
+      "Este cliente não possui fiado em aberto neste estabelecimento.",
+    );
+  }
 
   if (amount > currentBalance) {
     throw new Error(
@@ -95,26 +73,18 @@ export const createPayment = async ({
     );
   }
 
-  // =====================================================
-  // REGISTRAR PAGAMENTO
-  // =====================================================
-
+  // Registra o pagamento vinculado ao estabelecimento correto.
   await db.customerDebt.create({
     data: {
+      barbershopId,
       userId,
       amount,
       type: "PAYMENT",
-      description: description ?? "Pagamento de fiado",
+      description: description?.trim() || "Pagamento de fiado",
     },
   });
 
-  // =====================================================
-  // ATUALIZAR DASHBOARD
-  // =====================================================
-
   revalidatePath("/barbeiro/dashboard");
 
-  return {
-    success: true,
-  };
+  return { success: true };
 };

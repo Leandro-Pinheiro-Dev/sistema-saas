@@ -255,7 +255,7 @@ const BarbershopPage = async ({
 
         <div className="relative h-72 w-full overflow-hidden sm:h-96">
           <Image
-            src={barbershop.imageUrl}
+            src={barbershop.imageUrl || "/LOGO_SpacoVip.jpeg"}
             alt={barbershop.name}
             fill
             priority

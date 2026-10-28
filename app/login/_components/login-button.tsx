@@ -9,7 +9,7 @@ import { LogIn } from "lucide-react";
 const LoginButton = () => {
   const handleLogin = async () => {
     await signIn("google", {
-      callbackUrl: "/",
+      callbackUrl: "/login/redirect",
     });
   };
 

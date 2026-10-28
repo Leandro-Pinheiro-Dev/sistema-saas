@@ -1,35 +1,28 @@
 "use server";
 
-import { getServerSession } from "next-auth";
-
-import { authOptions } from "@/lib/auth";
-
 import { db } from "@/lib/prisma";
+import { requireBusinessStaff } from "@/lib/permissions/membership";
 
-export const getCustomerDebts = async () => {
+export const getCustomerDebts = async (barbershopId: string) => {
   // =====================================================
-  // AUTENTICAÇÃO
+  // VALIDAR ESTABELECIMENTO E AUTORIZAÇÃO
   // =====================================================
 
-  const session = await getServerSession(authOptions);
-
-  if (!session?.user?.id) {
-    throw new Error("Usuário não autenticado.");
+  if (!barbershopId?.trim()) {
+    throw new Error("Estabelecimento não informado.");
   }
 
-  // =====================================================
-  // AUTORIZAÇÃO
-  // =====================================================
-
-  if (session.user.role !== "BARBER") {
-    throw new Error("Acesso não autorizado.");
-  }
+  await requireBusinessStaff(barbershopId);
 
   // =====================================================
-  // BUSCAR TODOS OS FIADOS
+  // BUSCAR SOMENTE OS FIADOS DO ESTABELECIMENTO
   // =====================================================
 
   const debts = await db.customerDebt.findMany({
+    where: {
+      barbershopId,
+    },
+
     include: {
       user: {
         select: {
@@ -52,49 +45,33 @@ export const getCustomerDebts = async () => {
   });
 
   // =====================================================
-  // NORMALIZAR
+  // NORMALIZAR DADOS PARA O FRONTEND
   // =====================================================
 
   return debts.map((debt) => ({
     id: debt.id,
-
     userId: debt.userId,
-
     bookingId: debt.bookingId,
-
     clientName: debt.clientName,
-
     clientPhone: debt.clientPhone,
-
     amount: Number(debt.amount),
-
     type: debt.type,
-
     description: debt.description,
-
     createdAt: debt.createdAt,
-
     user: debt.user,
 
     booking: debt.booking
       ? {
           id: debt.booking.id,
-
           userId: debt.booking.userId,
-
           serviceId: debt.booking.serviceId,
-
           date: debt.booking.date,
-
           clientName: debt.booking.clientName,
-
           clientPhone: debt.booking.clientPhone,
 
           service: {
             id: debt.booking.service.id,
-
             name: debt.booking.service.name,
-
             price: Number(debt.booking.service.price),
           },
         }

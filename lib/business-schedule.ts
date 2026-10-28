@@ -9,7 +9,6 @@ import { db } from "@/lib/prisma";
 //
 // IMPORTANTE:
 // - Não cancela agendamentos existentes.
-// - Não altera FixedSchedule.
 // - Apenas impede NOVOS agendamentos em dias/horários
 //   que estejam fechados ou bloqueados.
 //
@@ -43,15 +42,11 @@ export async function validateBusinessSchedule({
   // ainda não foi configurado.
 
   if (!businessDay) {
-    throw new Error(
-      "Este dia não está configurado para atendimento.",
-    );
+    throw new Error("Este dia não está configurado para atendimento.");
   }
 
   if (!businessDay.active) {
-    throw new Error(
-      "A barbearia está fechada neste dia.",
-    );
+    throw new Error("A barbearia está fechada neste dia.");
   }
 
   // ===================================================
@@ -72,15 +67,11 @@ export async function validateBusinessSchedule({
   // também consideramos indisponível.
 
   if (!businessTimeSlot) {
-    throw new Error(
-      "Este horário não está configurado para atendimento.",
-    );
+    throw new Error("Este horário não está configurado para atendimento.");
   }
 
   if (!businessTimeSlot.active) {
-    throw new Error(
-      "Este horário está bloqueado para novos agendamentos.",
-    );
+    throw new Error("Este horário está bloqueado para novos agendamentos.");
   }
 
   return {

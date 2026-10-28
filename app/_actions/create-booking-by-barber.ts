@@ -1,40 +1,57 @@
 "use server";
 
 import { authOptions } from "@/lib/auth";
+
 import { db } from "@/lib/prisma";
+
 import { calculateBookingDiscount } from "@/app/utils/booking-discount";
+
 import {
   getPricedBookingServices,
   isHaircutService,
 } from "@/app/utils/booking-pricing";
+
 import { validateBusinessSchedule } from "@/lib/business-schedule";
+
 import { getServerSession } from "next-auth";
+
 import { revalidatePath } from "next/cache";
 
 interface CreateBookingByBarberParams {
   // =====================================================
+
   // SERVIÇOS
+
   // =====================================================
 
   serviceIds: string[];
 
   // =====================================================
+
   // DATA E HORÁRIO
+
   // =====================================================
 
   date: string;
+
   time: string;
 
   // =====================================================
+
   // CLIENTE
+
   // =====================================================
 
   userId?: string;
+
   clientName?: string;
+
   clientPhone?: string;
 
   // =====================================================
+
   // CORTE INFANTIL
+
   // =====================================================
 
   isChild?: boolean;
@@ -42,15 +59,23 @@ interface CreateBookingByBarberParams {
 
 export const createBookingByBarber = async ({
   serviceIds,
+
   date,
+
   time,
+
   userId,
+
   clientName,
+
   clientPhone,
+
   isChild = false,
 }: CreateBookingByBarberParams) => {
   // =====================================================
+
   // 1. AUTENTICAÇÃO
+
   // =====================================================
 
   const session = await getServerSession(authOptions);
@@ -60,15 +85,9 @@ export const createBookingByBarber = async ({
   }
 
   // =====================================================
-  // 2. SOMENTE BARBEIRO PODE CRIAR PELO PAINEL
-  // =====================================================
 
-  if (session.user.role !== "BARBER") {
-    throw new Error("Apenas o barbeiro pode criar agendamentos.");
-  }
-
-  // =====================================================
   // 3. VALIDAR SERVIÇOS
+
   // =====================================================
 
   if (!Array.isArray(serviceIds) || serviceIds.length === 0) {
@@ -76,10 +95,13 @@ export const createBookingByBarber = async ({
   }
 
   // Remove serviços duplicados.
+
   const uniqueServiceIds = [...new Set(serviceIds)];
 
   // =====================================================
+
   // 4. VALIDAR DATA
+
   // =====================================================
 
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
@@ -87,7 +109,9 @@ export const createBookingByBarber = async ({
   }
 
   // =====================================================
+
   // 5. VALIDAR HORÁRIO
+
   // =====================================================
 
   if (!/^\d{2}:\d{2}$/.test(time)) {
@@ -108,18 +132,29 @@ export const createBookingByBarber = async ({
   }
 
   // =====================================================
+
   // 6. DESCOBRIR O DIA DA SEMANA
+
   // =====================================================
 
   // Usamos UTC ao meio-dia somente para descobrir
+
   // corretamente o dia da semana da DATA CIVIL.
+
   //
+
   // Domingo = 0
+
   // Segunda = 1
+
   // Terça = 2
+
   // Quarta = 3
+
   // Quinta = 4
+
   // Sexta = 5
+
   // Sábado = 6
 
   const [year, month, day] = date.split("-").map(Number);
@@ -133,7 +168,9 @@ export const createBookingByBarber = async ({
   const dayOfWeek = dateForDayOfWeek.getUTCDay();
 
   // =====================================================
+
   // 7. BUSCAR TODOS OS SERVIÇOS
+
   // =====================================================
 
   const services = await db.barbershopService.findMany({
@@ -145,15 +182,44 @@ export const createBookingByBarber = async ({
   });
 
   // Verifica se todos os serviços existem.
+
   if (services.length !== uniqueServiceIds.length) {
     throw new Error("Um ou mais serviços não foram encontrados.");
   }
 
   // =====================================================
+
   // 8. GARANTIR QUE TODOS PERTENCEM À MESMA BARBEARIA
+
   // =====================================================
 
   const barbershopId = services[0].barbershopId;
+
+  const membership = await db.membership.findFirst({
+    where: {
+      userId: session.user.id,
+
+      barbershopId,
+
+      active: true,
+
+      role: {
+        in: ["OWNER", "BARBER"],
+      },
+    },
+
+    select: {
+      id: true,
+
+      role: true,
+    },
+  });
+
+  if (!membership) {
+    throw new Error(
+      "Você não tem permissão para criar agendamentos neste estabelecimento.",
+    );
+  }
 
   const allFromSameBarbershop = services.every(
     (service) => service.barbershopId === barbershopId,
@@ -166,10 +232,13 @@ export const createBookingByBarber = async ({
   }
 
   // =====================================================
+
   // 9. VALIDAR CORTE INFANTIL
+
   // =====================================================
 
   // O preço infantil só pode ser usado quando existe
+
   // Corte de Cabelo entre os serviços selecionados.
 
   const hasHaircut = services.some((service) => isHaircutService(service.name));
@@ -181,63 +250,95 @@ export const createBookingByBarber = async ({
   }
 
   // =====================================================
+
   // 10. VALIDAR AGENDA DA BARBEARIA
+
   // =====================================================
 
   await validateBusinessSchedule({
     barbershopId,
+
     dayOfWeek,
+
     time,
   });
 
   // =====================================================
+
   // 11. CALCULAR PREÇOS DOS SERVIÇOS
+
   // =====================================================
 
   // Preço normal:
+
   //
+
   // Corte de Cabelo = R$35
+
   //
+
   // Preço infantil:
+
   //
+
   // Corte de Cabelo = R$30
+
   //
+
   // Os demais serviços continuam com seus preços normais.
 
   const pricedServices = getPricedBookingServices(
     services.map((service) => ({
       id: service.id,
+
       name: service.name,
+
       price: Number(service.price),
     })),
+
     isChild,
   );
 
   // =====================================================
+
   // 12. CALCULAR DESCONTO DOS COMBOS
+
   // =====================================================
 
   // O desconto é aplicado DEPOIS do preço infantil.
+
   //
+
   // Exemplo:
+
   //
+
   // Corte infantil + Barba
+
   //
+
   // R$30 + R$35 = R$65
+
   //
+
   // Combo Corte + Barba = -R$10
+
   //
+
   // Total = R$55
 
   const discountResult = calculateBookingDiscount(
     pricedServices.map((service) => ({
       name: service.name,
+
       price: service.price,
     })),
   );
 
   // =====================================================
+
   // 13. DEFINIR TIPO DE CLIENTE
+
   // =====================================================
 
   const hasRegisteredClient = Boolean(userId);
@@ -253,7 +354,9 @@ export const createBookingByBarber = async ({
   }
 
   // =====================================================
+
   // 14. CLIENTE CADASTRADO
+
   // =====================================================
 
   if (userId) {
@@ -269,7 +372,9 @@ export const createBookingByBarber = async ({
   }
 
   // =====================================================
+
   // 15. CLIENTE MANUAL
+
   // =====================================================
 
   const normalizedClientName = clientName?.trim() || null;
@@ -281,17 +386,27 @@ export const createBookingByBarber = async ({
   }
 
   // =====================================================
+
   // 16. CRIAR DATA COMPLETA
+
   // =====================================================
 
   // A data é criada explicitamente no horário de São Paulo.
+
   //
+
   // Exemplo:
+
   //
+
   // 2026-09-18 + 10:00
+
   //
+
   // vira:
+
   //
+
   // 18/09/2026 às 10:00 em São Paulo.
 
   const bookingDate = new Date(`${date}T${time}:00-03:00`);
@@ -301,76 +416,100 @@ export const createBookingByBarber = async ({
   }
 
   // =====================================================
-  // 17. VERIFICAR HORÁRIO FIXO
+  // 17. VERIFICAR SOBREPOSIÇÃO DE AGENDAMENTOS
   // =====================================================
 
-  const fixedSchedule = await db.fixedSchedule.findFirst({
+  const slotStart = new Date(bookingDate);
+  slotStart.setSeconds(0, 0);
+
+  const totalDurationMinutes = services.reduce(
+    (total, service) => total + service.durationMinutes,
+    0,
+  );
+
+  if (totalDurationMinutes <= 0) {
+    throw new Error("A duração dos serviços é inválida.");
+  }
+
+  const slotEnd = new Date(slotStart.getTime() + totalDurationMinutes * 60_000);
+  const dayStart = new Date(`${date}T00:00:00-03:00`);
+
+  const existingBookings = await db.booking.findMany({
     where: {
       barbershopId,
-      dayOfWeek,
-      time,
-      active: true,
+      date: {
+        gte: dayStart,
+        lt: slotEnd,
+      },
+      status: {
+        in: ["PENDING", "CONFIRMED"],
+      },
+    },
+    select: {
+      date: true,
+      clientName: true,
+      service: {
+        select: {
+          durationMinutes: true,
+        },
+      },
+      bookingItems: {
+        select: {
+          service: {
+            select: {
+              durationMinutes: true,
+            },
+          },
+        },
+      },
     },
   });
 
-  if (fixedSchedule) {
+  const conflictingBooking = existingBookings.find((existingBooking) => {
+    const existingDurationMinutes =
+      existingBooking.bookingItems.length > 0
+        ? existingBooking.bookingItems.reduce(
+            (total, item) => total + item.service.durationMinutes,
+            0,
+          )
+        : existingBooking.service.durationMinutes;
+
+    const existingStart = existingBooking.date;
+    const existingEnd = new Date(
+      existingStart.getTime() + existingDurationMinutes * 60_000,
+    );
+
+    return existingStart < slotEnd && existingEnd > slotStart;
+  });
+
+  if (conflictingBooking) {
+    const existingClient = conflictingBooking.clientName || "outro cliente";
     throw new Error(
-      `Este horário já está reservado para ${fixedSchedule.clientName}.`,
+      `Este horário conflita com o agendamento de ${existingClient}.`,
     );
   }
 
   // =====================================================
-  // 18. VERIFICAR OUTRO AGENDAMENTO
-  // =====================================================
-
-  const slotStart = new Date(bookingDate);
-
-  slotStart.setSeconds(0, 0);
-
-  const slotEnd = new Date(slotStart);
-
-  slotEnd.setMinutes(slotEnd.getMinutes() + 1);
-
-  const existingBooking = await db.booking.findFirst({
-    where: {
-      date: {
-        gte: slotStart,
-        lt: slotEnd,
-      },
-      status: {
-        not: "CANCELLED",
-      },
-    },
-  });
-
-  if (existingBooking) {
-    const existingClient = existingBooking.clientName || "outro cliente";
-
-    throw new Error(`Este horário já está agendado para ${existingClient}.`);
-  }
-
-  // =====================================================
-  // 19. CRIAR AGENDAMENTO
+  // 18. CRIAR AGENDAMENTO
   // =====================================================
 
   const booking = await db.booking.create({
     data: {
       userId: userId || null,
 
+      barbershopId,
+
+      barberMembershipId: membership.role === "BARBER" ? membership.id : null,
+
       clientName: normalizedClientName,
 
       clientPhone: normalizedClientPhone,
 
-      // Mantemos o primeiro serviço no campo legado.
       serviceId: uniqueServiceIds[0],
 
       date: bookingDate,
 
       status: "PENDING",
-
-      // =================================================
-      // VALORES FINANCEIROS
-      // =================================================
 
       subtotal: discountResult.subtotal,
 
@@ -378,22 +517,9 @@ export const createBookingByBarber = async ({
 
       total: discountResult.total,
 
-      // =================================================
-      // TODOS OS SERVIÇOS
-      // =================================================
-
       bookingItems: {
         create: pricedServices.map((service) => ({
           serviceId: service.id,
-
-          // Guarda o preço REAL cobrado no momento
-          // da criação do agendamento.
-          //
-          // Corte normal:
-          // R$35
-          //
-          // Corte infantil:
-          // R$30
 
           price: service.price,
         })),
@@ -402,15 +528,21 @@ export const createBookingByBarber = async ({
   });
 
   // =====================================================
-  // 20. ATUALIZAR PÁGINAS
+
+  // 19. ATUALIZAR PÁGINAS
+
   // =====================================================
 
   revalidatePath("/");
+
   revalidatePath("/bookings");
+
   revalidatePath("/barbeiro/dashboard");
 
   // =====================================================
-  // 21. RETORNAR RESULTADO
+
+  // 20. RETORNAR RESULTADO
+
   // =====================================================
 
   return {

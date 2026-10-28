@@ -2,11 +2,13 @@
 
 import { getServerSession } from "next-auth";
 import { revalidatePath } from "next/cache";
+import { requireBusinessStaff } from "@/lib/permissions/membership";
 
 import { authOptions } from "@/lib/auth";
 import { db } from "@/lib/prisma";
 
 interface CreateDebtParams {
+  barbershopId: string;
   userId?: string;
   bookingId?: string;
   clientName?: string;
@@ -16,6 +18,7 @@ interface CreateDebtParams {
 }
 
 export const createDebt = async ({
+  barbershopId,
   userId,
   bookingId,
   clientName: inputClientName,
@@ -23,55 +26,24 @@ export const createDebt = async ({
   amount,
   description,
 }: CreateDebtParams) => {
-  // =====================================================
-  // AUTENTICAÇÃO
-  // =====================================================
-
   const session = await getServerSession(authOptions);
 
   if (!session?.user?.id) {
     throw new Error("Usuário não autenticado.");
   }
 
-  // =====================================================
-  // AUTORIZAÇÃO
-  // =====================================================
-
-  if (session.user.role !== "BARBER") {
-    throw new Error("Acesso não autorizado.");
-  }
-
-  // =====================================================
-  // VALIDAÇÃO DO VALOR
-  // =====================================================
-
   if (!Number.isFinite(amount) || amount <= 0) {
     throw new Error("O valor do fiado deve ser maior que zero.");
   }
-
-  // =====================================================
-  // DADOS DO CLIENTE
-  // =====================================================
-
+  await requireBusinessStaff(barbershopId);
   let finalUserId: string | null = userId ?? null;
-
   let finalClientName: string | null = inputClientName?.trim() || null;
-
   let finalClientPhone: string | null = inputClientPhone?.trim() || null;
-
-  // =====================================================
-  // CLIENTE CADASTRADO
-  // =====================================================
 
   if (userId) {
     const user = await db.user.findUnique({
-      where: {
-        id: userId,
-      },
-      select: {
-        id: true,
-        name: true,
-      },
+      where: { id: userId },
+      select: { id: true, name: true },
     });
 
     if (!user) {
@@ -79,20 +51,14 @@ export const createDebt = async ({
     }
 
     finalUserId = user.id;
-
-    if (!finalClientName) {
-      finalClientName = user.name ?? null;
-    }
+    finalClientName ??= user.name;
   }
 
-  // =====================================================
-  // AGENDAMENTO
-  // =====================================================
-
   if (bookingId) {
-    const booking = await db.booking.findUnique({
+    const booking = await db.booking.findFirst({
       where: {
         id: bookingId,
+        barbershopId,
       },
       select: {
         id: true,
@@ -103,20 +69,12 @@ export const createDebt = async ({
     });
 
     if (!booking) {
-      throw new Error("Agendamento não encontrado.");
+      throw new Error("Agendamento não encontrado nesta empresa.");
     }
-
-    // ===================================================
-    // VERIFICAR CONFLITO DE CLIENTE
-    // ===================================================
 
     if (userId && booking.userId && booking.userId !== userId) {
       throw new Error("O agendamento não pertence ao cliente informado.");
     }
-
-    // ===================================================
-    // CLIENTE DO AGENDAMENTO
-    // ===================================================
 
     if (booking.userId) {
       finalUserId = booking.userId;
@@ -130,29 +88,18 @@ export const createDebt = async ({
       finalClientPhone = booking.clientPhone;
     }
 
-    // ===================================================
-    // AGENDAMENTO MANUAL
-    // ===================================================
-
     if (!booking.userId && !booking.clientName) {
       throw new Error("O agendamento manual não possui nome de cliente.");
     }
   }
 
-  // =====================================================
-  // VALIDAR CLIENTE MANUAL
-  // =====================================================
-
   if (!finalUserId && !finalClientName) {
     throw new Error("Informe o nome do cliente manual.");
   }
 
-  // =====================================================
-  // CRIAR DÉBITO
-  // =====================================================
-
   await db.customerDebt.create({
     data: {
+      barbershopId,
       userId: finalUserId,
       bookingId: bookingId ?? null,
       clientName: finalClientName,
@@ -163,13 +110,7 @@ export const createDebt = async ({
     },
   });
 
-  // =====================================================
-  // ATUALIZAR DASHBOARD
-  // =====================================================
-
   revalidatePath("/barbeiro/dashboard");
 
-  return {
-    success: true,
-  };
+  return { success: true };
 };

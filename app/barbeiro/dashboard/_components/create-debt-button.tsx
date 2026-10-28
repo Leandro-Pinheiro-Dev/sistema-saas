@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { createDebt } from "@/app/_actions/create-debt";
 
 interface CreateDebtButtonProps {
+  barbershopId: string;
   userId?: string | null;
   bookingId: string;
   amount: number;
@@ -15,6 +16,7 @@ interface CreateDebtButtonProps {
 }
 
 const CreateDebtButton = ({
+  barbershopId,
   userId,
   bookingId,
   amount,
@@ -35,6 +37,7 @@ const CreateDebtButton = ({
         }
 
         await createDebt({
+          barbershopId,
           userId,
           bookingId,
           amount,

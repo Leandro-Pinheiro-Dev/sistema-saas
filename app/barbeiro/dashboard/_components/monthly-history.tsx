@@ -1,10 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
-
 import { ChevronLeft, ChevronRight, History } from "lucide-react";
 
 import { getMonthlyHistory } from "../_actions/get-monthly-history";
+
+type MonthlyHistoryProps = {
+  barbershopId: string;
+};
 
 type MonthlyHistoryData = Awaited<ReturnType<typeof getMonthlyHistory>>;
 
@@ -22,14 +25,14 @@ const formatMonth = (year: number, month: number) => {
   });
 };
 
-const MonthlyHistory = () => {
+const MonthlyHistory = ({ barbershopId }: MonthlyHistoryProps) => {
   const now = new Date();
 
   const [year, setYear] = useState(now.getFullYear());
   const [month, setMonth] = useState(now.getMonth() + 1);
-
   const [history, setHistory] = useState<MonthlyHistoryData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -37,29 +40,36 @@ const MonthlyHistory = () => {
     const loadHistory = async () => {
       try {
         const data = await getMonthlyHistory({
+          barbershopId,
           year,
           month,
         });
 
         if (!cancelled) {
           setHistory(data);
-          setLoading(false);
+          setErrorMessage(null);
         }
       } catch (error) {
         console.error("Erro ao carregar histórico mensal:", error);
 
+        if (!cancelled) {
+          setErrorMessage("Não foi possível carregar o histórico deste mês.");
+        }
+      } finally {
         if (!cancelled) {
           setLoading(false);
         }
       }
     };
 
-    loadHistory();
+    if (barbershopId) {
+      void loadHistory();
+    }
 
     return () => {
       cancelled = true;
     };
-  }, [year, month]);
+  }, [barbershopId, year, month]);
 
   const previousMonth = () => {
     setLoading(true);
@@ -87,10 +97,7 @@ const MonthlyHistory = () => {
 
   return (
     <section className="mb-8 rounded-2xl border border-zinc-800 bg-zinc-900 p-5 shadow-xl sm:p-6">
-      {/* =====================================================
-          CABEÇALHO
-      ===================================================== */}
-
+      {/* Cabeçalho */}
       <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <div className="flex items-center gap-2">
@@ -104,10 +111,7 @@ const MonthlyHistory = () => {
           </p>
         </div>
 
-        {/* =====================================================
-            NAVEGAÇÃO
-        ===================================================== */}
-
+        {/* Navegação entre meses */}
         <div className="flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-950 p-2">
           <button
             type="button"
@@ -118,7 +122,7 @@ const MonthlyHistory = () => {
             <ChevronLeft className="h-5 w-5" />
           </button>
 
-          <span className="min-w-45' text-center text-sm font-semibold capitalize text-white">
+          <span className="min-w-[11rem] text-center text-sm font-semibold capitalize text-white">
             {formatMonth(year, month)}
           </span>
 
@@ -133,13 +137,17 @@ const MonthlyHistory = () => {
         </div>
       </div>
 
-      {/* =====================================================
-          TOTAL RECEBIDO
-      ===================================================== */}
-
+      {/* Total recebido */}
       {loading ? (
         <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-8 text-center">
-          <p className="text-sm text-zinc-500">Carregando...</p>
+          <p className="text-sm text-zinc-500">Carregando histórico...</p>
+        </div>
+      ) : errorMessage ? (
+        <div
+          role="alert"
+          className="rounded-xl border border-red-900/50 bg-red-950/20 p-6 text-center"
+        >
+          <p className="text-sm text-red-400">{errorMessage}</p>
         </div>
       ) : (
         <div className="rounded-xl border border-green-900/50 bg-linear-to-br from-green-950/40 to-zinc-950 p-6">

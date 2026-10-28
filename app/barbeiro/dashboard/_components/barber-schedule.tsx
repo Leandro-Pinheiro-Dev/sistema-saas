@@ -7,14 +7,9 @@ import { toast } from "sonner";
 import { getBarberSchedule } from "@/app/_actions/get-barber-schedule";
 
 import {
-  getBusinessSchedule,
+  getBusinessScheduleForStaff,
   type BusinessScheduleDay,
 } from "@/app/barbeiro/dashboard/_actions/business-schedule";
-
-import {
-  releaseFixedSchedule,
-  restoreFixedSchedule,
-} from "@/app/barbeiro/dashboard/_actions/fixed-schedule-exception";
 
 import CreateBookingButton from "./create-booking-button";
 
@@ -71,6 +66,7 @@ interface Booking {
 // =====================================================
 
 interface BarberScheduleProps {
+  barbershopId: string;
   initialDate?: Date;
   users: User[];
   services: Service[];
@@ -81,6 +77,7 @@ interface BarberScheduleProps {
 // =====================================================
 
 const BarberSchedule = ({
+  barbershopId,
   initialDate = new Date(),
   users,
   services,
@@ -92,15 +89,6 @@ const BarberSchedule = ({
   const [selectedDate, setSelectedDate] = useState<Date>(initialDate);
 
   const [bookings, setBookings] = useState<Booking[]>([]);
-
-  const [fixedSchedules, setFixedSchedules] = useState<
-    {
-      id: string;
-      clientName: string;
-      time: string;
-      released: boolean;
-    }[]
-  >([]);
 
   const [businessSchedule, setBusinessSchedule] = useState<
     BusinessScheduleDay[]
@@ -140,47 +128,33 @@ const BarberSchedule = ({
   // CARREGAR AGENDA
   // =====================================================
 
-  const loadSchedule = useCallback((date: Date) => {
-    const dateString = formatDateForServer(date);
+  const loadSchedule = useCallback(
+    (date: Date) => {
+      const dateString = formatDateForServer(date);
 
-    startTransition(async () => {
-      try {
-        console.log("Consultando agenda:", dateString);
+      startTransition(async () => {
+        try {
+          const [scheduleResult, businessScheduleResult] = await Promise.all([
+            getBarberSchedule(dateString, barbershopId),
+            getBusinessScheduleForStaff(barbershopId),
+          ]);
 
-        // =================================================
-        // CARREGA:
-        // 1. AGENDAMENTOS
-        // 2. HORÁRIOS FIXOS
-        // 3. CONFIGURAÇÃO DA AGENDA
-        // =================================================
+          setBookings(scheduleResult.bookings);
+          setBusinessSchedule(businessScheduleResult);
+          setBusinessScheduleLoaded(true);
+        } catch (error) {
+          console.error("ERRO AO CARREGAR A AGENDA:", error);
 
-        const [scheduleResult, businessScheduleResult] = await Promise.all([
-          getBarberSchedule(dateString),
-          getBusinessSchedule(),
-        ]);
+          toast.error("Não foi possível carregar a agenda.");
 
-        setBookings(scheduleResult.bookings);
-
-        setFixedSchedules(scheduleResult.fixedSchedules);
-
-        setBusinessSchedule(businessScheduleResult);
-
-        setBusinessScheduleLoaded(true);
-      } catch (error) {
-        console.error("ERRO AO CARREGAR AGENDA:", error);
-
-        toast.error("Não foi possível carregar a agenda.");
-
-        setBookings([]);
-
-        setFixedSchedules([]);
-
-        setBusinessSchedule([]);
-
-        setBusinessScheduleLoaded(false);
-      }
-    });
-  }, []);
+          setBookings([]);
+          setBusinessSchedule([]);
+          setBusinessScheduleLoaded(false);
+        }
+      });
+    },
+    [barbershopId],
+  );
 
   // =====================================================
   // CARREGAR QUANDO A DATA MUDAR
@@ -298,14 +272,6 @@ const BarberSchedule = ({
   };
 
   // =====================================================
-  // ENCONTRAR HORÁRIO FIXO
-  // =====================================================
-
-  const getFixedScheduleByTime = (time: string) => {
-    return fixedSchedules.find((schedule) => schedule.time === time);
-  };
-
-  // =====================================================
   // HORÁRIOS QUE DEVEM SER EXIBIDOS
   //
   // Normalmente são os horários configurados no banco.
@@ -318,7 +284,6 @@ const BarberSchedule = ({
   const displayTimes = Array.from(
     new Set([
       ...configuredTimes,
-      ...fixedSchedules.map((schedule) => schedule.time),
       ...bookings.map((booking) => {
         const bookingDate = new Date(booking.date);
 
@@ -430,11 +395,7 @@ const BarberSchedule = ({
       <div className="max-h-162.5 space-y-3 overflow-y-auto pr-2">
         {displayTimes.map((time) => {
           const booking = getBookingByTime(time);
-
-          const fixedSchedule = getFixedScheduleByTime(time);
-
           const timeSlotConfig = getTimeSlotConfig(time);
-
           const timeActive = isTimeActive(time);
 
           return (
@@ -442,161 +403,13 @@ const BarberSchedule = ({
               key={time}
               className="flex flex-col gap-3 rounded-xl border border-zinc-800 bg-zinc-900 p-4 md:flex-row md:items-center"
             >
-              {/* =================================================
-                  HORÁRIO
-              ================================================= */}
-
               <div className="w-20 shrink-0 text-lg font-bold">{time}</div>
 
-              {/* =================================================
-                  HORÁRIO FIXO
-                  
-                  HORÁRIO FIXO SEMPRE CONTINUA VISÍVEL.
-              ================================================= */}
-
-              {fixedSchedule && !fixedSchedule.released ? (
-                <div className="flex flex-1 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div>
-                    <p className="font-semibold text-red-400">
-                      {fixedSchedule.clientName}
-                    </p>
-
-                    <p className="text-sm text-zinc-500">Horário fixo</p>
-
-                    {!timeActive && (
-                      <p className="mt-1 text-xs text-yellow-500">
-                        Atenção: horário atualmente bloqueado.
-                      </p>
-                    )}
-                  </div>
-
-                  <button
-                    type="button"
-                    disabled={isPending}
-                    onClick={() => {
-                      const confirmed = window.confirm(
-                        `Liberar o horário das ${time} para outros clientes nesta data?`,
-                      );
-
-                      if (!confirmed) {
-                        return;
-                      }
-
-                      startTransition(async () => {
-                        try {
-                          await releaseFixedSchedule({
-                            date: formatDateForServer(selectedDate),
-                            time,
-                          });
-
-                          toast.success(`${time} liberado para esta data.`);
-
-                          loadSchedule(selectedDate);
-                        } catch (error) {
-                          console.error(error);
-
-                          toast.error(
-                            error instanceof Error
-                              ? error.message
-                              : "Não foi possível liberar o horário.",
-                          );
-                        }
-                      });
-                    }}
-                    className="rounded-lg border border-red-800 bg-red-950/40 px-4 py-2 text-sm font-semibold text-red-400 transition hover:bg-red-900/40 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    🔓 Liberar
-                  </button>
-                </div>
-              ) : fixedSchedule && fixedSchedule.released ? (
-                <div className="flex flex-1 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div>
-                    <p className="font-semibold text-green-400">Disponível</p>
-
-                    <p className="text-sm text-zinc-500">
-                      {fixedSchedule.clientName} — horário fixo liberado
-                    </p>
-
-                    {!timeActive && (
-                      <p className="mt-1 text-xs text-yellow-500">
-                        Atenção: horário atualmente bloqueado pela agenda.
-                      </p>
-                    )}
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    {!booking && timeActive && (
-                      <CreateBookingButton
-                        users={users}
-                        services={services}
-                        initialDate={createLocalDateWithTime(
-                          selectedDate,
-                          time,
-                        )}
-                      />
-                    )}
-
-                    <button
-                      type="button"
-                      disabled={isPending}
-                      onClick={() => {
-                        const confirmed = window.confirm(
-                          `Bloquear novamente o horário das ${time} para ${fixedSchedule.clientName}?`,
-                        );
-
-                        if (!confirmed) {
-                          return;
-                        }
-
-                        startTransition(async () => {
-                          try {
-                            await restoreFixedSchedule({
-                              date: formatDateForServer(selectedDate),
-                              time,
-                            });
-
-                            toast.success(
-                              `${time} voltou a ficar reservado para ${fixedSchedule.clientName}.`,
-                            );
-
-                            loadSchedule(selectedDate);
-                          } catch (error) {
-                            console.error(error);
-
-                            toast.error(
-                              error instanceof Error
-                                ? error.message
-                                : "Não foi possível bloquear o horário.",
-                            );
-                          }
-                        });
-                      }}
-                      className="rounded-lg border border-green-800 bg-green-950/40 px-4 py-2 text-sm font-semibold text-green-400 transition hover:bg-green-900/40 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      🔒 Bloquear
-                    </button>
-                  </div>
-                </div>
-              ) : booking ? (
-                /* =================================================
-                   AGENDAMENTO EXISTENTE
-
-                   AGENDAMENTOS EXISTENTES NÃO SÃO ESCONDIDOS
-                   QUANDO UM HORÁRIO É BLOQUEADO.
-                ================================================= */
-
+              {booking ? (
                 <div className="flex-1 rounded-lg border border-zinc-800 bg-zinc-900 p-3">
-                  {/* =================================================
-                      CLIENTE
-                  ================================================= */}
-
                   <p className="font-semibold text-white">
-                    {booking.clientName}
+                    {booking.clientName ?? "Cliente não identificado"}
                   </p>
-
-                  {/* =================================================
-                      SERVIÇOS
-                  ================================================= */}
 
                   <div className="mt-2 space-y-1">
                     {booking.services.map((service) => (
@@ -615,13 +428,8 @@ const BarberSchedule = ({
                     ))}
                   </div>
 
-                  {/* =================================================
-                      TOTAL
-                  ================================================= */}
-
                   <div className="mt-2 flex items-center justify-between border-t border-zinc-800 pt-2">
                     <span className="text-xs text-zinc-500">Total</span>
-
                     <span className="font-bold text-green-400">
                       R$ {booking.totalPrice.toFixed(2)}
                     </span>
@@ -634,58 +442,34 @@ const BarberSchedule = ({
                   )}
                 </div>
               ) : !businessScheduleLoaded ? (
-                /* =================================================
-                   CONFIGURAÇÃO AINDA CARREGANDO
-                ================================================= */
-
                 <div className="flex-1">
                   <p className="text-sm text-zinc-500">Carregando...</p>
                 </div>
               ) : !selectedBusinessDay?.active ? (
-                /* =================================================
-                   DIA FECHADO
-                ================================================= */
-
                 <div className="flex-1">
                   <p className="font-semibold text-red-400">Fechado</p>
-
                   <p className="text-sm text-zinc-500">
                     Novos agendamentos indisponíveis.
                   </p>
                 </div>
               ) : !timeSlotConfig ? (
-                /* =================================================
-                   HORÁRIO FORA DA CONFIGURAÇÃO
-                ================================================= */
-
                 <div className="flex-1">
                   <p className="font-semibold text-zinc-500">Não configurado</p>
-
                   <p className="text-sm text-zinc-600">
                     Este horário não está configurado na agenda.
                   </p>
                 </div>
               ) : !timeSlotConfig.active ? (
-                /* =================================================
-                   HORÁRIO BLOQUEADO
-                ================================================= */
-
                 <div className="flex-1">
                   <p className="font-semibold text-yellow-500">Bloqueado</p>
-
                   <p className="text-sm text-zinc-500">
                     Novos agendamentos indisponíveis.
                   </p>
                 </div>
               ) : (
-                /* =================================================
-                   HORÁRIO DISPONÍVEL
-                ================================================= */
-
                 <div className="flex flex-1 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div>
                     <p className="font-semibold text-green-400">Disponível</p>
-
                     <p className="text-sm text-zinc-500">Horário livre</p>
                   </div>
 

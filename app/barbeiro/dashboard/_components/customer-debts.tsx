@@ -76,6 +76,7 @@ interface CustomerDebt {
 }
 
 interface CustomerDebtsProps {
+  barbershopId: string;
   users: User[];
 }
 
@@ -95,7 +96,7 @@ const normalizePhone = (phone?: string | null) => {
 // COMPONENTE
 // =====================================================
 
-const CustomerDebts = ({ users }: CustomerDebtsProps) => {
+const CustomerDebts = ({ barbershopId, users }: CustomerDebtsProps) => {
   const [customers, setCustomers] = useState<CustomerDebt[]>([]);
 
   const [isPending, startTransition] = useTransition();
@@ -115,7 +116,7 @@ const CustomerDebts = ({ users }: CustomerDebtsProps) => {
   const loadDebts = () => {
     startTransition(async () => {
       try {
-        const result = await getCustomerDebts();
+        const result = await getCustomerDebts(barbershopId);
 
         // =================================================
         // CONVERTER RESULTADO DO BANCO
@@ -428,7 +429,7 @@ const CustomerDebts = ({ users }: CustomerDebtsProps) => {
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
             {/* ADICIONAR FIADO */}
 
-            <AddDebtButton users={users} />
+            <AddDebtButton barbershopId={barbershopId} users={users} />
 
             {/* TOTAL */}
 
@@ -509,6 +510,7 @@ const CustomerDebts = ({ users }: CustomerDebtsProps) => {
                   {/* PAGAR */}
 
                   <PayDebtButton
+                    barbershopId={barbershopId}
                     userId={
                       customer.userId.startsWith("manual:")
                         ? undefined

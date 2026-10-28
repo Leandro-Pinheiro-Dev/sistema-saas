@@ -32,7 +32,13 @@ const DAYS = [
 // COMPONENTE
 // =====================================================
 
-export default function BusinessScheduleSettings() {
+interface BusinessScheduleSettingsProps {
+  barbershopId: string;
+}
+
+export default function BusinessScheduleSettings({
+  barbershopId,
+}: BusinessScheduleSettingsProps) {
   const [schedule, setSchedule] = useState<BusinessScheduleDay[]>([]);
   const [months, setMonths] = useState<BusinessScheduleMonth[]>([]);
   const [loading, setLoading] = useState(true);
@@ -48,8 +54,8 @@ export default function BusinessScheduleSettings() {
     async function loadSchedule() {
       try {
         const [scheduleResult, monthsResult] = await Promise.all([
-          getBusinessSchedule(),
-          getBusinessMonths(),
+          getBusinessSchedule(barbershopId),
+          getBusinessMonths(barbershopId),
         ]);
 
         if (mounted) {
@@ -74,7 +80,7 @@ export default function BusinessScheduleSettings() {
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [barbershopId]);
 
   // ===================================================
   // ENCONTRAR DIA
@@ -116,7 +122,7 @@ export default function BusinessScheduleSettings() {
 
     startTransition(async () => {
       try {
-        await updateBusinessMonth(year, month, active);
+        await updateBusinessMonth(barbershopId, year, month, active);
 
         toast.success(
           active
@@ -128,7 +134,7 @@ export default function BusinessScheduleSettings() {
 
         // Recupera o estado real do banco caso a operação falhe.
         try {
-          const currentMonths = await getBusinessMonths();
+          const currentMonths = await getBusinessMonths(barbershopId);
           setMonths(currentMonths);
         } catch (reloadError) {
           console.error(reloadError);
@@ -162,7 +168,7 @@ export default function BusinessScheduleSettings() {
 
     startTransition(async () => {
       try {
-        await updateBusinessDay(dayOfWeek, active);
+        await updateBusinessDay(barbershopId, dayOfWeek, active);
 
         toast.success(
           active ? "Dia aberto com sucesso." : "Dia fechado com sucesso.",
@@ -172,7 +178,7 @@ export default function BusinessScheduleSettings() {
 
         // Recarrega o estado real caso dê erro.
         try {
-          const currentSchedule = await getBusinessSchedule();
+          const currentSchedule = await getBusinessSchedule(barbershopId);
           setSchedule(currentSchedule);
         } catch (reloadError) {
           console.error(reloadError);
@@ -217,7 +223,7 @@ export default function BusinessScheduleSettings() {
 
     startTransition(async () => {
       try {
-        await updateBusinessTimeSlot(dayOfWeek, time, active);
+        await updateBusinessTimeSlot(barbershopId, dayOfWeek, time, active);
 
         toast.success(active ? `${time} liberado.` : `${time} bloqueado.`);
       } catch (error) {
@@ -225,7 +231,7 @@ export default function BusinessScheduleSettings() {
 
         // Recarrega o estado real caso dê erro.
         try {
-          const currentSchedule = await getBusinessSchedule();
+          const currentSchedule = await getBusinessSchedule(barbershopId);
           setSchedule(currentSchedule);
         } catch (reloadError) {
           console.error(reloadError);

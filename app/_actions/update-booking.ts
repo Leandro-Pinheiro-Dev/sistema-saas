@@ -34,14 +34,6 @@ export const updateBooking = async ({
   }
 
   // =====================================================
-  // VERIFICAR BARBEIRO
-  // =====================================================
-
-  if (session.user.role !== "BARBER") {
-    throw new Error("Acesso não autorizado.");
-  }
-
-  // =====================================================
   // VALIDAR AGENDAMENTO
   // =====================================================
 
@@ -54,7 +46,31 @@ export const updateBooking = async ({
   if (!booking) {
     throw new Error("Agendamento não encontrado.");
   }
+  const membership = await db.membership.findFirst({
+    where: {
+      userId: session.user.id,
+      barbershopId: booking.barbershopId,
+      active: true,
+      role: {
+        in: ["OWNER", "BARBER"],
+      },
+    },
+    select: {
+      id: true,
+      role: true,
+    },
+  });
 
+  if (!membership) {
+    throw new Error("Você não tem permissão para editar este agendamento.");
+  }
+
+  if (
+    membership.role === "BARBER" &&
+    booking.barberMembershipId !== membership.id
+  ) {
+    throw new Error("Você só pode editar os seus próprios agendamentos.");
+  }
   // =====================================================
   // VALIDAR SERVIÇO
   // =====================================================
@@ -67,6 +83,11 @@ export const updateBooking = async ({
 
   if (!service) {
     throw new Error("Serviço não encontrado.");
+  }
+  if (service.barbershopId !== booking.barbershopId) {
+    throw new Error(
+      "O serviço não pertence ao estabelecimento do agendamento.",
+    );
   }
 
   // =====================================================
