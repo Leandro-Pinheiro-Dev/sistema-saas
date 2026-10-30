@@ -1,302 +1,218 @@
-import Header from "./_components/header";
-
-import { Button } from "./_components/ui/button";
-
-import { quickSearchOptions } from "./_constants/search";
-
-import Image from "next/image";
-
-import BarbershopItem from "./_components/barbershop-item";
-
-import { db } from "@/lib/prisma";
-
+import Link from "next/link";
+import { redirect } from "next/navigation";
 import { getServerSession } from "next-auth";
+import { Search, Store } from "lucide-react";
+import { Prisma } from "@prisma/client";
 
 import { authOptions } from "@/lib/auth";
-
-import { redirect } from "next/navigation";
-
-import { format } from "date-fns";
-
-import { ptBR } from "date-fns/locale";
-
-import { MessageCircle } from "lucide-react";
-
-import Link from "next/link";
-
+import { db } from "@/lib/prisma";
+import Header from "./_components/header";
+import BarbershopItem from "./_components/barbershop-item";
 import EnablePushNotifications from "@/app/_components/enable-push-notifications";
 
-import { getCurrentUserMemberships } from "@/lib/permissions/membership";
+const businessTypes = [
+  { value: "ALL", label: "Todos os segmentos" },
+  { value: "BARBERSHOP", label: "Barbearias" },
+  { value: "NAIL_SALON", label: "Manicure e unhas" },
+  { value: "EYEBROW_DESIGN", label: "Sobrancelhas" },
+  { value: "BEAUTY_SALON", label: "Salões de beleza" },
+  { value: "OTHER", label: "Outros serviços" },
+] as const;
 
-const Home = async () => {
-  // =====================================================
-  // VERIFICA AUTENTICAÇÃO
-  // =====================================================
+type HomePageProps = {
+  searchParams: Promise<{
+    q?: string;
+    type?: string;
+  }>;
+};
 
+export default async function Home({ searchParams }: HomePageProps) {
   const session = await getServerSession(authOptions);
 
-  // -----------------------------------------------------
-  // USUÁRIO NÃO LOGADO
-  // -----------------------------------------------------
-
-  if (!session?.user) {
+  if (!session?.user?.id) {
     redirect("/login");
   }
 
-  // -----------------------------------------------------
-  // BARBEIRO
-  // -----------------------------------------------------
-  if (session.user.role === "BARBER") {
-    const memberships = await getCurrentUserMemberships();
+  // A associação ativa define se a pessoa é proprietária
+  // ou funcionária. User.role sozinho não é suficiente.
+  const memberships = await db.membership.findMany({
+    where: {
+      userId: session.user.id,
+      active: true,
+    },
+    select: {
+      role: true,
+    },
+  });
 
-    const ownerMembership = memberships.find(
-      (membership) => membership.role === "OWNER",
-    );
-
-    if (ownerMembership) {
-      redirect("/barbeiro/dashboard");
-    }
-
-    // Usuário BARBER sem estabelecimento próprio:
-    // não redirecionar automaticamente ao dashboard.
+  if (memberships.some((membership) => membership.role === "OWNER")) {
+    redirect("/barbeiro/dashboard");
   }
 
-  // =====================================================
-  // A PARTIR DAQUI É CUSTOMER
-  // =====================================================
+  if (memberships.some((membership) => membership.role === "BARBER")) {
+    redirect("/funcionario/dashboard");
+  }
 
-  const today = new Date();
+  const user = await db.user.findUnique({
+    where: { id: session.user.id },
+    select: { needsRoleSelection: true },
+  });
 
-  const barbershops = await db.barbershop.findMany();
+  if (!user) {
+    redirect("/login");
+  }
+
+  if (user.needsRoleSelection) {
+    redirect("/acesso");
+  }
+
+  const params = await searchParams;
+  const query = params.q?.trim() ?? "";
+  const selectedType = params.type ?? "ALL";
+
+  const validTypes = businessTypes.map((type) => type.value);
+  const typeIsValid = validTypes.includes(
+    selectedType as (typeof businessTypes)[number]["value"],
+  );
+
+  const where: Prisma.BarbershopWhereInput = {
+    AND: [
+      query
+        ? {
+            OR: [
+              { name: { contains: query, mode: "insensitive" } },
+              { address: { contains: query, mode: "insensitive" } },
+              { description: { contains: query, mode: "insensitive" } },
+            ],
+          }
+        : {},
+      typeIsValid && selectedType !== "ALL"
+        ? {
+            businessType: selectedType as Exclude<
+              (typeof businessTypes)[number]["value"],
+              "ALL"
+            >,
+          }
+        : {},
+    ],
+  };
+
+  const barbershops = await db.barbershop.findMany({
+    where,
+    orderBy: { name: "asc" },
+  });
+
+  const selectedLabel =
+    businessTypes.find((type) => type.value === selectedType)?.label ??
+    "Todos os segmentos";
 
   return (
     <div className="flex min-h-screen justify-center bg-background">
       <div className="w-full max-w-5xl">
-        {/* =====================================================
-            HEADER
-        ===================================================== */}
-
         <Header />
         <EnablePushNotifications />
-        {/* =====================================================
-            CONTEÚDO
-        ===================================================== */}
 
         <main className="space-y-6 px-4 py-5 sm:px-5 md:py-6">
-          {/* =====================================================
-              BOAS-VINDAS
-          ===================================================== */}
-
           <section>
-            <h2 className="text-xl font-bold sm:text-2xl">
+            <h1 className="text-xl font-bold sm:text-2xl">
               Olá, {session.user.name?.split(" ")[0] || "Cliente"}!
-            </h2>
-
-            <p className="text-sm capitalize text-muted-foreground">
-              {format(today, "EEEE, dd 'de' MMMM", {
-                locale: ptBR,
-              })}
-              .
+            </h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Encontre um estabelecimento e escolha o serviço que deseja
+              agendar.
             </p>
           </section>
 
-          {/* =====================================================
-              BUSCA RÁPIDA
-          ===================================================== */}
-
-          <section>
-            <div className="flex w-full gap-3 overflow-x-auto pb-2">
-              {quickSearchOptions.map((option) => (
-                <Link
-                  key={option.title}
-                  href={
-                    barbershops.length > 0
-                      ? `/barbershops/${barbershops[0].id}?service=${encodeURIComponent(
-                          option.serviceName,
-                        )}`
-                      : "/barbershops"
-                  }
-                  className="
-                    inline-flex
-                    h-12
-                    shrink-0
-                    items-center
-                    justify-center
-                    gap-2
-                    rounded-md
-                    border
-                    border-input
-                    bg-white
-                    px-3
-                    text-sm
-                    font-medium
-                    text-gray-600
-                    shadow-sm
-                    transition-colors
-                    hover:bg-accent
-                    hover:text-accent-foreground
-                    sm:px-4
-                  "
-                >
-                  <Image
-                    src={option.imageUrl}
-                    alt={option.title}
-                    width={32}
-                    height={32}
-                    className="h-8 w-8 object-contain"
-                  />
-
-                  <span className="whitespace-nowrap">{option.title}</span>
-                </Link>
-              ))}
-            </div>
-          </section>
-
-          {/* =====================================================
-              BANNER
-          ===================================================== */}
-
-          <section>
-            <div className="relative h-48 w-full overflow-hidden rounded-2xl sm:h-64 md:h-80">
-              <Image
-                src="/pag.jpeg"
-                alt="Banner da barbearia"
-                fill
-                sizes="(max-width: 640px) 100vw, (max-width: 1024px) 90vw, 1024px"
-                className="object-cover"
-                priority
-              />
-            </div>
-          </section>
-
-          {/* =====================================================
-              BARBEARIAS
-          ===================================================== */}
-
-          <section>
-            <div className="mb-3 flex items-center gap-2 text-sm font-bold uppercase text-muted-foreground">
-              <Image
-                alt="Ícone de barbeiro"
-                src="/poste-de-barbeiro.png"
-                width={22}
-                height={22}
-                className="h-5.5 w-5.5 object-contain"
-              />
-
-              <span>Barbearia</span>
+          <section className="rounded-2xl border bg-card p-4 sm:p-5">
+            <div className="mb-4 flex items-center gap-2">
+              <Search size={20} aria-hidden="true" />
+              <h2 className="font-semibold">Buscar estabelecimentos</h2>
             </div>
 
-            <div className="flex gap-4 overflow-x-auto pb-2 scrollbar-none [&::-webkit-scrollbar]:hidden">
-              {barbershops.map((barbershop) => (
-                <BarbershopItem key={barbershop.id} barbershop={barbershop} />
-              ))}
-            </div>
-          </section>
-
-          {/* =====================================================
-              LOCALIZAÇÃO
-          ===================================================== */}
-
-          <section>
-            <div className="mb-3 flex items-center gap-2 text-sm font-bold uppercase text-muted-foreground">
-              <Image
-                alt="Localização"
-                src="/localizacao.png"
-                width={22}
-                height={22}
-                className="h-5.5 w-5.5 object-contain"
-              />
-
-              <span>Localização</span>
-            </div>
-
-            {/* =================================================
-                MAPA RESPONSIVO
-            ================================================= */}
-
-            <div className="aspect-video w-full overflow-hidden rounded-2xl border">
-              <iframe
-                src="https://www.google.com/maps/embed?pb=!3m2!1spt-BR!2sbr!4v1783143520245!5m2!1spt-BR!2sbr!6m8!1m7!1sTwe24M4lI-PSKZXPUayA4w!2m2!1d-23.21381344881015!2d-46.76093419562097!3f53.264221881845536!4f-7.647442068245411!5f0.7820865974627469"
-                width="100%"
-                height="100%"
-                style={{ border: 0 }}
-                allowFullScreen
-                loading="lazy"
-                referrerPolicy="strict-origin-when-cross-origin"
-              />
-            </div>
-
-            {/* =================================================
-                DADOS DA BARBEARIA
-            ================================================= */}
-
-            <div className="mt-4">
-              <h3 className="font-semibold">Barbearia SpaçoVip</h3>
-
-              <p className="text-sm text-muted-foreground">
-                Sebastião Batista de Oliveira - Conj. Hab. Sao Jose, 157
-              </p>
-
-              <p className="text-sm text-muted-foreground">
-                Campo Limpo Paulista - SP
-              </p>
-
-              {/* =================================================
-                  WHATSAPP
-              ================================================= */}
-
-              <a
-                href="https://wa.me/5511998821533?text=Olá!%20Gostaria%20de%20agendar%20um%20horário%20na%20Barbearia%20SpaçoVip"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="block"
-              >
-                <Button className="mt-4 h-11 w-full gap-2">
-                  <MessageCircle size={18} />
-                  Falar pelo WhatsApp
-                </Button>
-              </a>
-
-              {/* =================================================
-                  INSTAGRAM
-              ================================================= */}
-
-              <a
-                href="https://www.instagram.com/spaco_vip_rafael/"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="block"
-              >
-                <Button variant="outline" className="mt-3 h-11 w-full gap-2">
-                  <Image
-                    src="/logotipo-do-instagram.png"
-                    alt="Instagram"
-                    width={18}
-                    height={18}
-                    className="h-4.5 w-4.5 object-contain"
-                  />
-                  Instagram
-                </Button>
-              </a>
-            </div>
-
-            {/* =================================================
-                VER ROTA
-            ================================================= */}
-
-            <a
-              href="https://maps.app.goo.gl/GP4oFqw8t9vRyjAe6"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="block"
+            <form
+              action="/"
+              method="GET"
+              className="grid gap-3 sm:grid-cols-[1fr_220px_auto]"
             >
-              <Button className="mt-4 h-11 w-full">Ver rota</Button>
-            </a>
+              <label className="sr-only" htmlFor="business-query">
+                Nome, endereço ou descrição
+              </label>
+              <input
+                id="business-query"
+                name="q"
+                defaultValue={query}
+                placeholder="Nome, endereço ou serviço..."
+                className="h-11 min-w-0 rounded-lg border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+              />
+
+              <label className="sr-only" htmlFor="business-type">
+                Segmento
+              </label>
+              <select
+                id="business-type"
+                name="type"
+                defaultValue={typeIsValid ? selectedType : "ALL"}
+                className="h-11 rounded-lg border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+              >
+                {businessTypes.map((type) => (
+                  <option key={type.value} value={type.value}>
+                    {type.label}
+                  </option>
+                ))}
+              </select>
+
+              <button
+                type="submit"
+                className="h-11 rounded-lg bg-primary px-5 text-sm font-semibold text-primary-foreground hover:opacity-90"
+              >
+                Buscar
+              </button>
+            </form>
+
+            {(query || selectedType !== "ALL") && (
+              <Link
+                href="/"
+                className="mt-3 inline-block text-sm text-muted-foreground underline underline-offset-4"
+              >
+                Limpar filtros
+              </Link>
+            )}
+          </section>
+
+          <section>
+            <div className="mb-4 flex items-center gap-2">
+              <Store size={20} aria-hidden="true" />
+              <div>
+                <h2 className="font-bold">Estabelecimentos disponíveis</h2>
+                <p className="text-sm text-muted-foreground">
+                  {barbershops.length} resultado(s) — {selectedLabel}
+                </p>
+              </div>
+            </div>
+
+            {barbershops.length === 0 ? (
+              <div className="rounded-2xl border border-dashed p-8 text-center">
+                <Store
+                  className="mx-auto mb-3 text-muted-foreground"
+                  size={32}
+                />
+                <h3 className="font-semibold">
+                  Nenhum estabelecimento encontrado
+                </h3>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  Tente outro nome, endereço ou segmento.
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                {barbershops.map((barbershop) => (
+                  <BarbershopItem key={barbershop.id} barbershop={barbershop} />
+                ))}
+              </div>
+            )}
           </section>
         </main>
       </div>
     </div>
   );
-};
-
-export default Home;
+}

@@ -16,6 +16,8 @@ import BookingStatusButton from "./_components/booking-status-button";
 import BusinessScheduleSettings from "./_components/business-schedule-settings";
 import CustomerDebts from "./_components/customer-debts";
 import LogoutButton from "./_components/logout-button";
+import CreateServiceForm from "./_components/create-service-form";
+import CreateEmployeeForm from "./_components/create-employee-form";
 
 import EnablePushNotifications from "@/app/_components/enable-push-notifications";
 import { getDashboardSummary } from "@/app/_actions/get-dashboard-summary";
@@ -347,6 +349,10 @@ const BarberDashboardPage = async () => {
             </p>
           </div>
 
+          <div className="mb-6">
+            <CreateServiceForm barbershopId={barbershopId} />
+          </div>
+
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {services.map((service) => (
               <div
@@ -367,6 +373,19 @@ const BarberDashboardPage = async () => {
               </div>
             ))}
           </div>
+        </section>
+
+        {/* FUNCIONÁRIOS */}
+        <section className="mb-8 rounded-2xl border border-zinc-800 bg-zinc-900 p-5 shadow-xl sm:p-6">
+          <div className="mb-6">
+            <h2 className="text-xl font-bold text-white">Funcionários</h2>
+
+            <p className="mt-1 text-sm text-zinc-500">
+              Adicione profissionais ao estabelecimento {businessName}.
+            </p>
+          </div>
+
+          <CreateEmployeeForm barbershopId={barbershopId} />
         </section>
 
         {/* CONFIGURAÇÃO DA AGENDA */}

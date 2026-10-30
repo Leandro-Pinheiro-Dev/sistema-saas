@@ -84,7 +84,7 @@ export async function createBusiness(input: CreateBusinessInput) {
   }
 
   try {
-    const business = await db.$transaction(async (tx) => {
+    await db.$transaction(async (tx) => {
       const user = await tx.user.findUnique({
         where: { id: userId },
         select: { id: true },
@@ -151,7 +151,9 @@ export async function createBusiness(input: CreateBusinessInput) {
       await tx.user.update({
         where: { id: userId },
         data: {
-          role: "BARBER",
+          // O papel de proprietário é armazenado na Membership.
+          // O papel global não deve ser usado para autorizar
+          // funções administrativas de um estabelecimento.
           needsRoleSelection: false,
         },
       });
